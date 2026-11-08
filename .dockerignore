@@ -10,3 +10,4 @@ dist
 docs/plans
 *.tsbuildinfo
 *.cpuprofile
+data
