@@ -1,0 +1,12 @@
+.git
+.local
+.wrangler
+.dev.vars*
+.env*
+node_modules
+coverage
+build
+dist
+docs/plans
+*.tsbuildinfo
+*.cpuprofile

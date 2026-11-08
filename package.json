@@ -1,0 +1,53 @@
+{
+  "name": "badtower-js",
+  "version": "0.0.0-preview.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "description": "Open-source invitation-gated opaque relay for Cloudflare Workers with SQLite-backed Durable Objects.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
+    "check:scripts": "node --check scripts/bootstrap-secrets.mjs && node --check scripts/rotate-secrets.mjs && node --check scripts/secret-material.mjs && node --check scripts/validate-deployment.mjs && node --check scripts/check-generated.mjs && node --check scripts/operator.mjs && node --check scripts/dryrun.mjs && sh -n scripts/container-entrypoint.sh scripts/deploy-cloudflare.sh",
+    "check:generated:data": "wrangler types worker-configuration.data.d.ts --check -c wrangler.data.jsonc",
+    "check:generated:operator": "wrangler types worker-configuration.operator.d.ts --check -c wrangler.operator.jsonc",
+    "check:generated": "node scripts/check-generated.mjs",
+    "test:contract": "vitest run --project workers test/contract.test.ts",
+    "test:admission": "vitest run --project workers test/admission.test.ts",
+    "test:access": "vitest run --project workers test/access.test.ts",
+    "test:reservation": "vitest run --project workers test/reservation.test.ts",
+    "test:relay": "vitest run --project workers test/relay.test.ts",
+    "test:status": "vitest run --project node test/status.test.ts",
+    "test:security:surface": "vitest run --project node test/security-surface.test.ts",
+    "test:security:access": "vitest run --project workers test/security-access.test.ts",
+    "test:security:abuse": "vitest run --project workers test/security-abuse.test.ts",
+    "test:security:targets": "vitest run --project workers test/security-targets.test.ts",
+    "test:security:streaming": "vitest run --project workers test/security-streaming.test.ts",
+    "test:security:relay": "vitest run --project workers test/security-relay.test.ts",
+    "test:security:responses": "vitest run --project workers test/security-responses.test.ts",
+    "test:security:scripts": "vitest run --project node test/security-scripts.test.ts",
+    "test:security:observability": "vitest run --project workers test/security-observability.test.ts",
+    "verify:focused": "npm run typecheck && npm run check:scripts && npm run check:generated && npm run test:security:surface && npm run test:security:access && npm run test:security:abuse && npm run test:security:targets && npm run test:security:streaming && npm run test:security:relay && npm run test:security:responses && npm run test:security:scripts && npm run test:security:observability && npm run test:contract && npm run test:access && npm run test:admission && npm run test:reservation && npm run test:relay && npm run test:status",
+    "secrets:bootstrap": "node scripts/bootstrap-secrets.mjs",
+    "secrets:rotate": "node scripts/rotate-secrets.mjs",
+    "operator": "node scripts/operator.mjs",
+    "container:up": "docker compose up --build -d",
+    "container:down": "docker compose down",
+    "cloudflare:deploy": "sh scripts/deploy-cloudflare.sh",
+    "dryrun": "node scripts/dryrun.mjs",
+    "check": "npm run verify:focused && npm run dryrun"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.21.2",
+    "@types/node": "26.2.0",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.122.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260811.1": true
+  }
+}

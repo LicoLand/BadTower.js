@@ -1,0 +1,21 @@
+services:
+  badtower:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${BADTOWER_PORT:-8790}:8787"
+    volumes:
+      - badtower-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /app/.wrangler:size=64m,uid=1000,gid=1000,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  badtower-data:

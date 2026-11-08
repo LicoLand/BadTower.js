@@ -1,0 +1,11 @@
+node_modules/
+.local/
+.wrangler/
+.dev.vars*
+.env*
+coverage/
+build/
+docs/plans/
+dist/
+*.tsbuildinfo
+*.cpuprofile

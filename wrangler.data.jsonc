@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "badtower-data",
+  "main": "src/data-entry.ts",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "data.badtower.invalid", "custom_domain": true }],
+  "vars": { "BADTOWER_RUNTIME_MODE": "production" },
+  "secrets": {
+    "required": [
+      "BADTOWER_CAPABILITY_KEYS",
+      "BADTOWER_HANDLE_KEYS",
+      "BADTOWER_HANDLE_CURRENT_SLOT"
+    ]
+  },
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false },
+    "traces": { "enabled": false }
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ACCESS_GRANTS", "class_name": "AccessGrant" },
+      { "name": "AFFILIATION_SHARDS", "class_name": "AffiliationShard" },
+      { "name": "RELAY_HANDLES", "class_name": "RelayHandle" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AffiliationShard", "RelayHandle"] },
+    { "tag": "v2", "new_sqlite_classes": ["AccessGrant"] }
+  ],
+  "ratelimits": [
+    { "name": "EDGE_ADMISSION_RATE_LIMITER", "namespace_id": "420001", "simple": { "limit": 3000, "period": 60 } },
+    { "name": "CLIENT_RATE_LIMITER", "namespace_id": "420002", "simple": { "limit": 600, "period": 60 } },
+    { "name": "SENSITIVE_RATE_LIMITER", "namespace_id": "420003", "simple": { "limit": 120, "period": 60 } }
+  ]
+}
