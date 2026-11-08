@@ -92,3 +92,48 @@ describe("atomic grant replay and budgets", () => {
     }
   });
 });
+
+describe("live-lease renewal", () => {
+  it("renewal keeps a live lease counted past its original TTL", async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const fixture = await activeGrant(now);
+      for (let index = 0; index < 8; index += 1) {
+        expect((await charge(fixture, index + 1, { concurrencyCost: 1, leaseTtlMs: 40_000 })).ok).toBe(true);
+      }
+      // Renewing before expiry keeps the lease alive past its original TTL.
+      clock.mockReturnValue(now + 30_000);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 40_000)).toBe(true);
+      clock.mockReturnValue(now + 50_000);
+      // Leases 2-8 lapsed at now+40s; the renewed lease 1 still counts, so
+      // only seven further leases fit the ceiling.
+      for (let index = 0; index < 7; index += 1) {
+        expect((await charge(fixture, 30 + index, { concurrencyCost: 1, leaseTtlMs: 40_000 })).ok).toBe(true);
+      }
+      expect((await charge(fixture, 50, { concurrencyCost: 1, leaseTtlMs: 40_000 })).ok).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("never resurrects an expired lease and rejects wrong epoch, counter and ttl", async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const fixture = await activeGrant(now);
+      expect((await charge(fixture, 1, { concurrencyCost: 1, leaseTtlMs: 10_000 })).ok).toBe(true);
+      expect(await fixture.grant.renewLease(fixture.epoch + 1, "1", 10_000)).toBe(false);
+      expect(await fixture.grant.renewLease(fixture.epoch, "999", 10_000)).toBe(false);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 0)).toBe(false);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 61_000)).toBe(false);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 10.5)).toBe(false);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 10_000)).toBe(true);
+      clock.mockReturnValue(now + 20_000);
+      expect(await fixture.grant.renewLease(fixture.epoch, "1", 10_000)).toBe(false);
+      expect((await charge(fixture, 2, { concurrencyCost: 1, leaseTtlMs: 10_000 })).ok).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});

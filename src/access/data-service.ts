@@ -143,3 +143,8 @@ export async function authenticateAndCharge(preauthentication: CapabilityPreauth
 export async function releaseAccessLease(env: Env, admission: Extract<AccessAdmission, { kind: "authorized" }>): Promise<void> {
   if (admission.leaseCounter !== undefined) await env.ACCESS_GRANTS.getByName(admission.selector).releaseLease(admission.epoch, admission.leaseCounter);
 }
+
+export async function renewAccessLease(env: Env, admission: Extract<AccessAdmission, { kind: "authorized" }>, leaseTtlMs: number): Promise<boolean> {
+  if (admission.leaseCounter === undefined) return false;
+  return env.ACCESS_GRANTS.getByName(admission.selector).renewLease(admission.epoch, admission.leaseCounter, leaseTtlMs);
+}

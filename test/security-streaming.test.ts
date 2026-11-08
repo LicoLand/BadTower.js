@@ -198,4 +198,142 @@ describe("manifest-backed relay streaming", () => {
     );
     expect(leaseCount).toBe(0);
   });
+
+  it("renews leases while held streams stay open past the original TTL", async () => {
+    const access = await generateAccessGrant();
+    const handles: string[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const reserved = await dataHandler.fetch(
+        opRequest("/v1/reserve", {
+          token: access.token,
+          headers: { "content-type": CONTROL_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+          body: encodeReserveRequest(
+            crypto.getRandomValues(new Uint8Array(32)),
+            crypto.getRandomValues(new Uint8Array(32)),
+            crypto.getRandomValues(new Uint8Array(32)),
+            HandleClass.FirstContact,
+          ),
+          cf: VALID_CF,
+        }),
+        env,
+      );
+      expect(reserved.status).toBe(201);
+      const reserveMap = readMap(new Uint8Array(await reserved.arrayBuffer()));
+      const handle = toBase64Url(bytesValue(reserveMap.find((entry) => entry.key === 1)!));
+      handles.push(handle);
+      const submitted = await dataHandler.fetch(
+        opRequest(`/v1/handles/${handle}/submit`, {
+          token: access.token,
+          headers: { "content-type": PROTECTED_PACKET_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+          body: Uint8Array.of(index + 1),
+          cf: VALID_CF,
+        }),
+        env,
+      );
+      expect(submitted.status).toBe(202);
+    }
+
+    const held: Response[] = [];
+    try {
+      for (const handle of handles.slice(0, 8)) {
+        const response = await dataHandler.fetch(
+          opRequest(`/v1/handles/${handle}/claim`, {
+            token: access.token,
+            headers: { "content-type": CONTROL_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+            body: encodeClaimRequest(1),
+            cf: VALID_CF,
+          }),
+          env,
+        );
+        expect(response.status).toBe(200);
+        held.push(response);
+      }
+      // Past the original 30 s lease TTL: renewals while the unread streams
+      // stay open must keep the leases counted, so a ninth claim is refused.
+      await new Promise((resolve) => setTimeout(resolve, 40_000));
+      const denied = await dataHandler.fetch(
+        opRequest(`/v1/handles/${handles[8]}/claim`, {
+          token: access.token,
+          headers: { "content-type": CONTROL_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+          body: encodeClaimRequest(1),
+          cf: VALID_CF,
+        }),
+        env,
+      );
+      expect(denied.status).toBe(401);
+    } finally {
+      await Promise.all(held.map((response) => response.body?.cancel().catch(() => undefined)));
+    }
+    const leaseCount = await runInDurableObject(
+      env.ACCESS_GRANTS.getByName(access.selector),
+      async (_instance, state) => {
+        const grant = await state.storage.get<{ leases: unknown[] }>("grant");
+        return grant?.leases.length ?? 0;
+      },
+    );
+    expect(leaseCount).toBe(0);
+  }, 60_000);
+
+  it("errors a held stream whose lease was lost", async () => {
+    const access = await generateAccessGrant();
+    const reserved = await dataHandler.fetch(
+      opRequest("/v1/reserve", {
+        token: access.token,
+        headers: { "content-type": CONTROL_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+        body: encodeReserveRequest(
+          crypto.getRandomValues(new Uint8Array(32)),
+          crypto.getRandomValues(new Uint8Array(32)),
+          crypto.getRandomValues(new Uint8Array(32)),
+          HandleClass.FirstContact,
+        ),
+        cf: VALID_CF,
+      }),
+      env,
+    );
+    expect(reserved.status).toBe(201);
+    const reserveMap = readMap(new Uint8Array(await reserved.arrayBuffer()));
+    const handle = toBase64Url(bytesValue(reserveMap.find((entry) => entry.key === 1)!));
+    const submitted = await dataHandler.fetch(
+      opRequest(`/v1/handles/${handle}/submit`, {
+        token: access.token,
+        headers: { "content-type": PROTECTED_PACKET_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+        body: Uint8Array.of(1),
+        cf: VALID_CF,
+      }),
+      env,
+    );
+    expect(submitted.status).toBe(202);
+    const response = await dataHandler.fetch(
+      opRequest(`/v1/handles/${handle}/claim`, {
+        token: access.token,
+        headers: { "content-type": CONTROL_MEDIA_TYPE, [OPERATION_ID_HEADER]: randomOpId() },
+        body: encodeClaimRequest(1),
+        cf: VALID_CF,
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    const released = await runInDurableObject(
+      env.ACCESS_GRANTS.getByName(access.selector),
+      async (instance, state) => {
+        const grant = await state.storage.get<{ epoch: number; leases: { counter: string }[] }>("grant");
+        if (grant === undefined || grant.leases.length === 0) return false;
+        return (instance as { releaseLease(e: number, c: string): Promise<boolean> }).releaseLease(grant.epoch, grant.leases[0]!.counter);
+      },
+    );
+    expect(released).toBe(true);
+    // After one renewal tick the lost lease drops ownership: the reader is
+    // cancelled and the outgoing stream errors.
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+    const reader = response.body!.getReader();
+    await expect(reader.read()).rejects.toThrow("stream unavailable");
+    const leaseCount = await runInDurableObject(
+      env.ACCESS_GRANTS.getByName(access.selector),
+      async (_instance, state) => {
+        const grant = await state.storage.get<{ leases: unknown[] }>("grant");
+        return grant?.leases.length ?? 0;
+      },
+    );
+    expect(leaseCount).toBe(0);
+  }, 30_000);
 });

@@ -168,6 +168,26 @@ export class AccessGrant extends DurableObject<Env> {
     });
   }
 
+  async renewLease(epoch: number, counter: string, leaseTtlMs: number): Promise<boolean> {
+    if (!Number.isInteger(epoch) || validCounter(counter) === null || !Number.isInteger(leaseTtlMs) || leaseTtlMs <= 0 || leaseTtlMs > MAX_LEASE_MS) return false;
+    return this.ctx.storage.transaction(async (transaction) => {
+      const grant = await transaction.get<StoredGrant>(STORAGE_KEY);
+      if (grant === undefined || grant.state !== "active" || grant.epoch !== epoch) return false;
+      const now = Math.max(
+        Date.now(),
+        grant.requestBucket.updatedAt,
+        grant.byteBucket.updatedAt,
+        grant.weightBucket.updatedAt,
+      );
+      if (now >= grant.credentialExpiresAt) return false;
+      const lease = grant.leases.find((lease) => lease.counter === counter && lease.expiresAt > now);
+      if (lease === undefined) return false;
+      lease.expiresAt = now + leaseTtlMs;
+      await transaction.put(STORAGE_KEY, grant);
+      return true;
+    });
+  }
+
   async releaseLease(epoch: number, counter: string): Promise<boolean> {
     if (!Number.isInteger(epoch) || validCounter(counter) === null) return false;
     return this.ctx.storage.transaction(async (transaction) => {

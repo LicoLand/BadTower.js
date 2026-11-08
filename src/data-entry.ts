@@ -5,7 +5,7 @@
  * construction, and privacy-minimal observability.
  */
 
-import { authenticateAndCharge, handleDataServiceRequest, preauthenticateCapability, releaseAccessLease, secureServiceRequest } from "./access/data-service";
+import { authenticateAndCharge, handleDataServiceRequest, preauthenticateCapability, releaseAccessLease, renewAccessLease, secureServiceRequest } from "./access/data-service";
 import type { AccessAdmission } from "./access/data-service";
 import { sha256 } from "./access/token";
 import { decodeBase64Url, toBase64Url } from "./encoding";
@@ -222,22 +222,59 @@ function holdLeaseUntilStreamEnds(
     releasePromise ??= releaseLeaseSafely(env, admission);
     return releasePromise;
   };
+  // A live stream keeps its lease through renewals; the TTL only covers a
+  // dead isolate, where renewals stop and the lease expires on its own.
+  let renewing = false;
+  let owned = true;
+  let interval: ReturnType<typeof setInterval> | null = null;
+  const clearRenewal = () => {
+    if (interval !== null) {
+      clearInterval(interval);
+      interval = null;
+    }
+  };
+  const renew = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    interval = setInterval(() => {
+      if (renewing || !owned) return;
+      renewing = true;
+      renewAccessLease(env, admission, STREAM_LEASE_TTL_MS)
+        .then((kept) => {
+          renewing = false;
+          if (kept || !owned) return;
+          owned = false;
+          clearRenewal();
+          reader.cancel().catch(() => undefined);
+          controller.error(new Error("stream unavailable"));
+          void releaseOnce();
+        })
+        .catch(() => {
+          renewing = false;
+          emitEvent({ event: "admission", outcome: "transient", failure: "internalUnavailable" });
+        });
+    }, STREAM_LEASE_RENEW_MS);
+  };
   return new ReadableStream<Uint8Array>({
+    start(controller) {
+      renew(controller);
+    },
     async pull(controller) {
       try {
         const next = await reader.read();
         if (next.done) {
+          clearRenewal();
           await releaseOnce();
           controller.close();
         } else {
           controller.enqueue(next.value);
         }
       } catch {
+        clearRenewal();
         await releaseOnce();
         controller.error(new Error("stream unavailable"));
       }
     },
     async cancel(reason) {
+      clearRenewal();
       try {
         await reader.cancel(reason);
       } catch {
@@ -426,6 +463,10 @@ export default {
   },
 };
 
+export const STREAM_LEASE_TTL_MS = 30_000;
+// One third of the TTL: two consecutive renewal misses are still tolerated.
+export const STREAM_LEASE_RENEW_MS = 10_000;
+
 function chargeFor(operation: Operation): {
   operationWeight: number;
   creationCost: number;
@@ -437,9 +478,9 @@ function chargeFor(operation: Operation): {
     case Operation.RESERVE:
       return { operationWeight: 4, creationCost: 1, concurrencyCost: 0, leaseTtlMs: 0 };
     case Operation.CLAIM:
-      return { operationWeight: 4, creationCost: 0, concurrencyCost: 1, leaseTtlMs: 30_000 };
+      return { operationWeight: 4, creationCost: 0, concurrencyCost: 1, leaseTtlMs: STREAM_LEASE_TTL_MS };
     case Operation.RETRIEVE:
-      return { operationWeight: 2, creationCost: 0, concurrencyCost: 1, leaseTtlMs: 30_000 };
+      return { operationWeight: 2, creationCost: 0, concurrencyCost: 1, leaseTtlMs: STREAM_LEASE_TTL_MS };
     case Operation.SUBMIT:
       return { operationWeight: 2, creationCost: 0, concurrencyCost: 0, leaseTtlMs: 0 };
     case Operation.SETTLE:
