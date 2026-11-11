@@ -5,20 +5,25 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "description": "Open-source invitation-gated opaque relay for Cloudflare Workers with SQLite-backed Durable Objects.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
-    "check:scripts": "node --check scripts/station.mjs && sh -n scripts/container-entrypoint.sh",
-    "check:generated": "wrangler types worker-configuration.d.ts --check -c wrangler.jsonc",
+    "check:scripts": "node --check scripts/station.mjs && node --check scripts/container-healthcheck.mjs && sh -n scripts/container-entrypoint.sh",
+    "check:generated": "wrangler types apps/station/worker-configuration.d.ts --check -c apps/station/wrangler.jsonc",
     "test": "vitest run",
     "test:workers": "vitest run --project workers",
+    "test:core": "vitest run --project core",
     "test:node": "vitest run --project node",
     "station": "node scripts/station.mjs",
     "container:up": "docker compose up --build -d",
     "container:down": "docker compose down",
-    "dryrun": "wrangler deploy --dry-run",
+    "dryrun": "wrangler deploy --dry-run -c apps/station/wrangler.jsonc",
     "check": "npm run typecheck && npm run check:scripts && npm run check:generated && npm run test && npm run dryrun"
   },
   "devDependencies": {

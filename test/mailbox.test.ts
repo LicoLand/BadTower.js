@@ -6,9 +6,11 @@ import {
   encodeClientFrame,
   encodeStationFrame,
   type StationFrame,
-} from "../src/frames";
+} from "@badtower/plugin-licoarc-mailbox";
 
-const STATION_KEY = Buffer.alloc(32, 1);
+// The test station key is minted per run by vitest.config.mts and bound
+// into the worker; the suite reads it back out of the environment.
+const stationKey = () => Buffer.from(env.BADTOWER_STATION_KEY, "base64url");
 const HELLO_CONTEXT = Buffer.from("licoarc-mailbox-hello-v1");
 
 function b64url(bytes: Buffer | Uint8Array): string {
@@ -18,12 +20,12 @@ function b64url(bytes: Buffer | Uint8Array): string {
 function invite(mailboxId: Buffer, notAfterSec = Math.floor(Date.now() / 1000) + 3600): string {
   const notAfter = Buffer.alloc(8);
   notAfter.writeBigUInt64BE(BigInt(notAfterSec));
-  const mac = createHmac("sha256", STATION_KEY).update(Buffer.concat([Buffer.from("btm1"), mailboxId, notAfter])).digest();
+  const mac = createHmac("sha256", stationKey()).update(Buffer.concat([Buffer.from("btm1"), mailboxId, notAfter])).digest();
   return `btm1.${b64url(Buffer.concat([mailboxId, notAfter, mac]))}`;
 }
 
 function revokeBody(mailboxId: Buffer): Buffer {
-  const mac = createHmac("sha256", STATION_KEY).update(Buffer.concat([Buffer.from("btr1"), mailboxId])).digest();
+  const mac = createHmac("sha256", stationKey()).update(Buffer.concat([Buffer.from("btr1"), mailboxId])).digest();
   return Buffer.concat([mailboxId, mac]);
 }
 
@@ -120,6 +122,13 @@ describe("station edge", () => {
     for (const path of ["/", "/v1/mailbox/extra", "/v1/other", "/healthz/"]) {
       const res = await SELF.fetch(`https://station.test${path}`);
       expect(res.status, path).toBe(404);
+    }
+  });
+
+  it("refuses plaintext http on every route", async () => {
+    for (const path of ["/healthz", "/v1/mailbox", "/v1/native/capacity"]) {
+      const res = await SELF.fetch(`http://station.test${path}`);
+      expect(res.status, path).toBe(403);
     }
   });
 

@@ -3,7 +3,13 @@
 An invitation-gated opaque mailbox relay on Cloudflare Workers: one
 Worker in front of one SQLite-backed Durable Object class (`Mailbox`),
 one permanent mailbox per mailbox id. Undelivered packets never expire —
-a stored packet leaves only on the recipient's ACK or on revocation.
+a stored packet leaves only on the recipient's settle or on revocation.
+
+The protocol-neutral core (`packages/station-core`) serves a native
+Reserve → Submit → Claim → Settle HTTP contract on its own; the
+`licoarc.mailbox.v1` WebSocket listener
+(`packages/plugin-licoarc-mailbox`) is a replaceable compatibility
+plugin; `apps/station` composes them into the deployable Worker.
 
 ## Properties
 
@@ -39,11 +45,12 @@ Or run it self-hosted in the container: see `docs/OPERATIONS.md`.
 
 ## Wire (summary)
 
-`wss://<station>/v1/mailbox` with
-`Sec-WebSocket-Protocol: licoarc.mailbox.v1` and
-`Authorization: Bearer btm1.<…>`. Frames are deterministic-CBOR closed
-maps: CHALLENGE/HELLO/READY, SEND/RESULT, DELIVER/ACK, DRAINED. Full
-grammar in `docs/API.md`; semantics in `ARCHITECTURE.md`.
+Native: `https://<station>/v1/native/{reserve,submit,claim,settle}` with
+`Authorization: Bearer btm1.<…>` and fixed binary bodies. LicoArc:
+`wss://<station>/v1/mailbox` with `Sec-WebSocket-Protocol:
+licoarc.mailbox.v1`; frames are deterministic-CBOR closed maps:
+CHALLENGE/HELLO/READY, SEND/RESULT, DELIVER/ACK, DRAINED. Full contracts
+in `docs/API.md`; semantics in `ARCHITECTURE.md`.
 
 ## Operations
 

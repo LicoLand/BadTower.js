@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "badtower-core-harness",
+  "main": "worker.ts",
+  "compatibility_date": "2026-08-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "BADTOWER_MAILBOX_CAPACITY_BYTES": "1000000000",
+    "BADTOWER_ALLOW_PLAINTEXT": "false"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MAILBOX", "class_name": "CoreMailbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CoreMailbox"] }]
+}

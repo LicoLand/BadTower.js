@@ -38,9 +38,31 @@ function fromBase64Url(text) {
   return Buffer.from(text, "base64url");
 }
 
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Repository-relative roots that both .gitignore and .dockerignore
+// exclude — the only places private material may be written in-tree.
+const REPO_PRIVATE_DIRS = ["data", "secrets"];
+
 function fail(message) {
   console.error(`station: ${message}`);
   process.exit(1);
+}
+
+/**
+ * Private material must never land at an arbitrary repository-relative
+ * path: anything inside the repository that is not under an
+ * ignore-covered private root is refused outright.
+ */
+function privateOutput(file) {
+  const resolved = path.resolve(file);
+  const relative = path.relative(REPO, resolved);
+  if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+    const first = relative.split(path.sep)[0];
+    if (!REPO_PRIVATE_DIRS.includes(first)) {
+      fail(`${file} is inside the repository; private material goes under ${REPO_PRIVATE_DIRS.join("/ or ")}/ or outside the tree`);
+    }
+  }
+  return resolved;
 }
 
 function parseArgs(argv) {
@@ -119,7 +141,7 @@ function pipe(from, fromArgs, to, toArgs) {
 }
 
 function cmdInit({ flags }) {
-  const dir = flags.dir ?? fail("--dir required");
+  const dir = privateOutput(flags.dir ?? fail("--dir required"));
   if (fs.existsSync(dir)) fail(`${dir} already exists; refusing to overwrite`);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const key = toBase64Url(randomBytes(32));
@@ -140,7 +162,7 @@ function cmdInvite({ flags }) {
   notAfter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 1000) + Number(match[1]) * unit));
   const mac = hmac(key, Buffer.from("btm1"), mailboxId, notAfter);
   const token = `btm1.${toBase64Url(Buffer.concat([mailboxId, notAfter, mac]))}`;
-  const out = flags.out ?? path.join(dir, `invite-${mailboxId.toString("hex")}.invitation`);
+  const out = privateOutput(flags.out ?? path.join(dir, `invite-${mailboxId.toString("hex")}.invitation`));
   writePrivate(out, `${token}\n`);
   console.log(`mailbox ${mailboxId.toString("hex")}`);
   console.log(`invitation written to ${out}`);
@@ -210,7 +232,7 @@ async function cmdHealth({ flags }) {
 }
 
 function cmdTls({ flags }) {
-  const dir = flags.dir ?? fail("--dir required");
+  const dir = privateOutput(flags.dir ?? fail("--dir required"));
   const ip = checked("ip", flags.ip ?? fail("--ip required"), SAFE_IP);
   const dns = flags.dns === undefined ? undefined : checked("dns", flags.dns, SAFE_DNS);
   try {
@@ -248,18 +270,18 @@ function cmdCloudflareDeploy({ flags }) {
   const dir = flags.dir ?? fail("--dir required");
   const varsFile = path.join(dir, ".dev.vars");
   if (!fs.existsSync(varsFile)) fail(`${varsFile} is missing; run station init first`);
-  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const config = path.join("apps", "station", "wrangler.jsonc");
   if (flags.domain === undefined) {
-    run("npx", ["wrangler", "deploy", "--secrets-file", varsFile], { cwd: repo });
+    run("npx", ["wrangler", "deploy", "-c", config, "--secrets-file", varsFile], { cwd: REPO });
   } else {
-    const base = fs.readFileSync(path.join(repo, "wrangler.jsonc"), "utf8");
-    const tmp = path.join(repo, "wrangler.deploy.jsonc");
+    const base = fs.readFileSync(path.join(REPO, config), "utf8");
+    const tmp = path.join(REPO, "wrangler.deploy.jsonc");
     fs.writeFileSync(
       tmp,
       base.replace(/"workers_dev": true,/, `"workers_dev": false,`),
     );
     try {
-      run("npx", ["wrangler", "deploy", "-c", tmp, "--secrets-file", varsFile, "--domains", flags.domain], { cwd: repo });
+      run("npx", ["wrangler", "deploy", "-c", tmp, "--secrets-file", varsFile, "--domains", flags.domain], { cwd: REPO });
     } finally {
       fs.rmSync(tmp, { force: true });
     }
@@ -272,7 +294,6 @@ async function cmdDockerDeploy({ flags }) {
   const dir = flags.dir ?? fail("--dir required");
   const listen = checked("listen", flags.listen ?? fail("--listen IP:PORT required"), SAFE_LISTEN);
   const remoteDir = checked("remote-dir", flags["remote-dir"] ?? "badtower-station", SAFE_PATH);
-  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const remoteIsWindows = (spawnSync("ssh", ["-o", "BatchMode=yes", host,
     "powershell", "-NoProfile", "-Command", "echo windows"], { encoding: "utf8" })
     .stdout ?? "").trim() === "windows";
@@ -281,7 +302,7 @@ async function cmdDockerDeploy({ flags }) {
     "docker version --format {{.Server.Arch}}"]).toString().trim();
   if (!/^\w+$/.test(arch)) fail(`remote docker arch unreadable: ${arch}`);
   console.log(`remote docker arch: ${arch}`);
-  run("docker", ["build", "--platform", `linux/${arch}`, "-t", "badtower-station:local", "."], { cwd: repo });
+  run("docker", ["build", "--platform", `linux/${arch}`, "-t", "badtower-station:local", "."], { cwd: REPO });
   const envFile = `LISTEN=${listen}\n`;
   const envTmp = path.join(os.tmpdir(), `badtower-env-${process.pid}`);
   fs.writeFileSync(envTmp, envFile, { mode: 0o600 });
@@ -294,7 +315,7 @@ async function cmdDockerDeploy({ flags }) {
     run("ssh", ["-o", "BatchMode=yes", host, "powershell", "-NoProfile", "-Command",
       `\"New-Item -ItemType Directory -Force '${remoteDir}' | Out-Null; New-Item -ItemType Directory -Force '${remoteDir}/secrets' | Out-Null; icacls '${remoteDir}/secrets' /inheritance:r /grant:r ($env:USERNAME + ':(OI)(CI)F') | Out-Null\"`]);
     copy(envTmp, `${remoteDir}/.env`);
-    copy(path.join(repo, "compose.yml"), `${remoteDir}/compose.yml`);
+    copy(path.join(REPO, "compose.yml"), `${remoteDir}/compose.yml`);
     copy(path.join(dir, ".dev.vars"), `${remoteDir}/secrets/.dev.vars`);
     copy(path.join(dir, "tls/server.key"), `${remoteDir}/secrets/server.key`);
     copy(path.join(dir, "tls/server.crt"), `${remoteDir}/secrets/server.crt`);
@@ -305,7 +326,7 @@ async function cmdDockerDeploy({ flags }) {
     run("ssh", ["-o", "BatchMode=yes", host,
       `set -e; mkdir -p '${remoteDir}/secrets' && chmod 700 '${remoteDir}/secrets'`]);
     copy(envTmp, `${remoteDir}/.env`);
-    copy(path.join(repo, "compose.yml"), `${remoteDir}/compose.yml`);
+    copy(path.join(REPO, "compose.yml"), `${remoteDir}/compose.yml`);
     copy(path.join(dir, ".dev.vars"), `${remoteDir}/secrets/.dev.vars`);
     copy(path.join(dir, "tls/server.key"), `${remoteDir}/secrets/server.key`);
     copy(path.join(dir, "tls/server.crt"), `${remoteDir}/secrets/server.crt`);

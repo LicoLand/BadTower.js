@@ -1,0 +1,12 @@
+{
+  "name": "badtower-station",
+  "version": "0.0.0-preview.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "description": "The deployable BadTower station Worker: the only composition of station-core and the LicoArc mailbox listener.",
+  "dependencies": {
+    "@badtower/station-core": "*",
+    "@badtower/plugin-licoarc-mailbox": "*"
+  }
+}

@@ -21,17 +21,21 @@ npm run station -- invite --dir ~/private/badtower [--bind-within 7d] [--out FIL
 Mints a random mailbox id and a `btm1` credential bound to it;
 `--bind-within` caps only the first binding (s/m/h/d/w suffixes). The
 file is written 0600; stdout shows only the mailbox id hex and the path.
+Private outputs may not land at arbitrary repository-relative paths:
+`--dir`, `--out` and TLS material are refused inside the tree unless
+they sit under `data/` or `secrets/` (both ignored by git and the
+image); the documented place is `data/`.
 
 ## Revocation
 
 ```sh
-npm run station -- revoke --dir ~/private/badtower --station https://HOST --mailbox HEX [--ca PEM]
+npm run station -- revoke --dir ~/private/badtower --station https://station.example --mailbox HEX [--ca PEM]
 ```
 
 ## TLS (self-hosted)
 
 ```sh
-npm run station -- tls --dir ~/private/badtower --ip 10.0.0.5 [--dns name]
+npm run station -- tls --dir ~/private/badtower --ip 203.0.113.10 [--dns name]
 ```
 
 Private CA (ECDSA P-256, 10y) and server certificate (SAN ip/dns, 825d)
@@ -69,14 +73,29 @@ only: no source tree, no registry access. Re-deploys keep the
 ## Health
 
 ```sh
-npm run station -- health --station https://HOST [--ca PEM]
+npm run station -- health --station https://station.example [--ca PEM]
 ```
+
+## Local development
+
+The Worker refuses non-https requests. `wrangler dev` defaults to plain
+http, so local development either runs the TLS path above or opts in
+explicitly:
+
+```sh
+npx wrangler dev -c apps/station/wrangler.jsonc --var BADTOWER_ALLOW_PLAINTEXT:true
+```
+
+The flag is a development override only; the deployed configuration
+ships `BADTOWER_ALLOW_PLAINTEXT: "false"`.
 
 ## Container
 
 `Dockerfile` + `compose.yml` run `wrangler dev --local` (workerd) with
 HTTPS from the mounted private CA, `--persist-to` on the `badtower-state`
 volume, read-only root, dropped caps and no-new-privileges. The container
-healthcheck verifies TLS against the mounted `ca.crt`. Mount
-`./secrets/` with `.dev.vars`, `server.key`, `server.crt`, `ca.crt` (from
-`init` + `tls`).
+healthcheck runs `scripts/container-healthcheck.mjs`, which reads
+`BADTOWER_HEALTHCHECK_URL` and `BADTOWER_HEALTHCHECK_CA` from the
+deployment environment (compose injects the loopback URL and the mounted
+`ca.crt`). Mount `./secrets/` with `.dev.vars`, `server.key`,
+`server.crt`, `ca.crt` (from `init` + `tls`).

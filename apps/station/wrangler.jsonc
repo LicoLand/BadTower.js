@@ -8,7 +8,10 @@
   "preview_urls": false,
   "observability": { "enabled": false, "logs": { "enabled": false } },
   "secrets": { "required": ["BADTOWER_STATION_KEY"] },
-  "vars": { "BADTOWER_MAILBOX_CAPACITY_BYTES": "1000000000" },
+  "vars": {
+    "BADTOWER_MAILBOX_CAPACITY_BYTES": "1000000000",
+    "BADTOWER_ALLOW_PLAINTEXT": "false"
+  },
   "durable_objects": {
     "bindings": [{ "name": "MAILBOX", "class_name": "Mailbox" }]
   },

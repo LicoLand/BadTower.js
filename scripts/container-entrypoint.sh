@@ -11,4 +11,4 @@ exec npx wrangler dev --local \
   --https-cert-path /run/badtower/server.crt \
   --persist-to /app/data/state \
   --env-file /run/badtower/.dev.vars \
-  -c wrangler.jsonc
+  -c apps/station/wrangler.jsonc

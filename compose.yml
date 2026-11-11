@@ -8,11 +8,13 @@ services:
     environment:
       TMPDIR: /tmp
       HOME: /tmp/home
+      BADTOWER_HEALTHCHECK_URL: https://127.0.0.1:8787/healthz
+      BADTOWER_HEALTHCHECK_CA: /run/badtower/ca.crt
     ports:
       - "${LISTEN:-127.0.0.1:8787}:8787"
     tmpfs:
-      - /tmp
-      - /app/node_modules/.mf
+      - /tmp:size=128m
+      - /app/node_modules/.mf:size=512m
     volumes:
       - badtower-state:/app/data
       - ./secrets/.dev.vars:/run/badtower/.dev.vars:ro

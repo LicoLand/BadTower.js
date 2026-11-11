@@ -12,5 +12,5 @@ RUN mkdir -p /app/data/state /tmp/.wrangler && chown -R station:station /app/dat
 USER station
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD node -e "require('node:https').get('https://127.0.0.1:8787/healthz',{ca:require('node:fs').readFileSync('/run/badtower/ca.crt')},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node scripts/container-healthcheck.mjs
 ENTRYPOINT ["sh", "scripts/container-entrypoint.sh"]

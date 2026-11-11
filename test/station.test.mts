@@ -51,6 +51,35 @@ describe("station.mjs invite", () => {
   });
 });
 
+describe("station.mjs private output boundary", () => {
+  const repo = path.resolve(path.dirname(STATION), "..");
+
+  it("refuses private outputs at arbitrary in-repository paths", () => {
+    const strayDir = path.join(repo, "scratch-station-test");
+    expect(() => run(["init", "--dir", strayDir])).toThrow();
+    expect(fs.existsSync(strayDir)).toBe(false);
+    const dir = path.join(tempDir(), "station");
+    run(["init", "--dir", dir]);
+    const strayInvite = path.join(repo, "stray.invitation");
+    expect(() => run(["invite", "--dir", dir, "--out", strayInvite])).toThrow();
+    expect(fs.existsSync(strayInvite)).toBe(false);
+  });
+
+  it("accepts private outputs under the ignored data/ root", () => {
+    const dir = path.join(repo, "data", `station-test-${process.pid}`);
+    try {
+      run(["init", "--dir", dir]);
+      expect(fs.existsSync(path.join(dir, "station.key"))).toBe(true);
+      const out = path.join(repo, "data", `invite-test-${process.pid}.invitation`);
+      run(["invite", "--dir", dir, "--out", out]);
+      expect(fs.readFileSync(out, "utf8").trim().startsWith("btm1.")).toBe(true);
+      fs.rmSync(out, { force: true });
+    } finally {
+      fs.rmSync(dir, { force: true, recursive: true });
+    }
+  });
+});
+
 describe("station.mjs tls", () => {
   it("produces a CA-verifiable server certificate with the requested SAN", () => {
     try {
