@@ -19,6 +19,7 @@
     "../src",
     "../worker-configuration.d.ts",
     "./**/*.ts",
+    "./**/*.mts",
     "../node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts"
   ]
 }

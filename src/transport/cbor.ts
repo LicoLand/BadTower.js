@@ -1,5 +1,6 @@
 /**
- * Minimal deterministic-CBOR codec for the pinned Candidate grammar.
+ * Minimal deterministic-CBOR codec for the mailbox transport v1 frame
+ * grammar.
  *
  * Admitted: definite shortest unsigned integers, definite byte strings,
  * definite arrays, and unsigned-key maps in strictly ascending label order.
@@ -15,16 +16,6 @@ export class CborError extends Error {
 }
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
-
-/** Canonical CBOR head used by bounded incremental response encoders. */
-export function encodeCborHead(major: 0 | 2 | 4 | 5, value: number): Uint8Array {
-  const writer = new CborWriter(CborWriter.uintSize(value));
-  if (major === 0) writer.uint(value);
-  else if (major === 2) writer.bytesHeader(value);
-  else if (major === 4) writer.arrayHeader(value);
-  else writer.mapHeader(value);
-  return writer.finish();
-}
 
 export class CborReader {
   readonly buf: Uint8Array;
@@ -114,12 +105,6 @@ export class CborReader {
     return out;
   }
 
-  arrayHeader(): number {
-    const { major, info } = this.head();
-    if (major !== 4) throw new CborError("expected array");
-    return this.argument(info);
-  }
-
   /**
    * Reads one definite map whose keys are unsigned integers in strictly
    * ascending order. Values are returned as copy-free slices of the buffer.
@@ -176,25 +161,6 @@ export class CborWriter {
     this.out = new Uint8Array(size);
   }
 
-  static uintSize(n: number): number {
-    if (!Number.isSafeInteger(n) || n < 0) throw new CborError("invalid integer");
-    if (n < 24) return 1;
-    if (n < 256) return 2;
-    if (n < 65536) return 3;
-    if (n < 4294967296) return 5;
-    return 9;
-  }
-
-  static bytesSize(b: Uint8Array): number {
-    return CborWriter.uintSize(b.length) + b.length;
-  }
-
-  static arraySize(count: number, elementSizes: number[]): number {
-    let total = CborWriter.uintSize(count);
-    for (const size of elementSizes) total += size;
-    return total;
-  }
-
   private headWithMajor(major: number, n: number): void {
     if (!Number.isSafeInteger(n) || n < 0) throw new CborError("invalid integer");
     const at = this.pos;
@@ -245,10 +211,6 @@ export class CborWriter {
 
   bytesHeader(length: number): void {
     this.headWithMajor(2, length);
-  }
-
-  arrayHeader(count: number): void {
-    this.headWithMajor(4, count);
   }
 
   mapHeader(count: number): void {

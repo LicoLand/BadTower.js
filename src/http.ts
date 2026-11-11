@@ -59,15 +59,6 @@ export async function readBoundedBody(request: Request, maxBytes: number): Promi
   return { kind: "ok", bytes };
 }
 
-export function jsonNoStore(value: unknown, status = 200): Response {
-  return secureResponse(JSON.stringify(value), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-    },
-  });
-}
-
 export function emptyNoStore(status: number): Response {
   return secureResponse(null, { status });
 }

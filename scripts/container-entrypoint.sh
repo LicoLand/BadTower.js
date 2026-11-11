@@ -1,17 +1,14 @@
 #!/bin/sh
+# BadTower Station container entrypoint: wrangler dev --local in workerd,
+# HTTPS on a mounted private CA, persistent state on the data volume.
 set -eu
-
-config_dir=$(mktemp -d)
-export XDG_CONFIG_HOME="$config_dir"
-private_dir=data/private
-node scripts/validate-deployment.mjs --target-dir "$private_dir"
-
-exec npx wrangler dev \
-  --local \
+mkdir -p /tmp/.wrangler /tmp/home/.config/.wrangler /app/node_modules/.mf
+exec npx wrangler dev --local \
   --ip 0.0.0.0 \
   --port 8787 \
-  --persist-to data/state \
-  --env-file "$private_dir/.dev.vars" \
-  --var BADTOWER_RUNTIME_MODE:local \
-  --show-interactive-dev-session false \
-  --log-level warn
+  --local-protocol https \
+  --https-key-path /run/badtower/server.key \
+  --https-cert-path /run/badtower/server.crt \
+  --persist-to /app/data/state \
+  --env-file /run/badtower/.dev.vars \
+  -c wrangler.jsonc

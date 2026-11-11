@@ -2,6 +2,8 @@ node_modules/
 .local/
 .wrangler/
 .dev.vars*
+!.dev.vars.example
+/wrangler.deploy.jsonc
 .env*
 coverage/
 build/
@@ -10,3 +12,4 @@ dist/
 *.tsbuildinfo
 *.cpuprofile
 /data/
+/secrets/

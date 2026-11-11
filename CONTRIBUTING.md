@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 24 or later
+- Node.js 22 or later
 - npm
 - Docker only for container verification
 - A Cloudflare account only for an explicitly authorized deployment
@@ -11,13 +11,13 @@
 
 ```sh
 npm ci
-npm run verify:focused
+npm run test
 ```
 
-`verify:focused` runs strict TypeScript checks, generated-binding drift,
-Workers-runtime access, admission, contract, reservation and relay suites, and
-repository-fact checks. Run the integrated `npm run check` once after all
-changes; it adds a Wrangler deployment dry run without publishing anything.
+`npm run test` runs the vitest suite: the Workers-runtime mailbox and
+station-edge tests plus the Node ops-script checks. `npm run check` adds
+strict TypeScript checks, script lint, generated-binding drift detection
+and a Wrangler deployment dry run without publishing anything.
 
 ## Rules
 
@@ -27,7 +27,7 @@ changes; it adds a Wrangler deployment dry run without publishing anything.
   add human-chosen invitation or access-token paths.
 - Keep authentication before relay lookup, carrier validation before body
   reading, and all allocations and durable collections explicitly bounded.
-- Keep core routing protocol-neutral. Candidate transport behavior remains in
+- Keep core routing protocol-neutral. Transport-layer codecs live in
   `src/transport/`; access control cannot acquire endpoint identity or trust
   semantics.
 - Use synthetic opaque bytes in tests. Never convert production traffic or
