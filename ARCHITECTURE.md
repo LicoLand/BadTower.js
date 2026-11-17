@@ -43,7 +43,9 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   is refused (the LicoArc listener surfaces this as close code 4003).
 - The native contract is Reserve → Submit → Claim → Settle over fixed
   opaque binary fields (`/v1/native/…`, same `btm1` admission), plus
-  health, capacity and revocation. It works with no plugin installed.
+  health, capacity, contract version and revocation. It works with no
+  plugin installed. The contract version is `1.0`, queried at
+  `GET /v1/native/version` and governed by `docs/NATIVE-CONTRACT.md`.
 - Delivery is at-least-once with a 16-packet in-flight window; settle
   deletes the row. Unsettled packets replay in sequence order. When
   nothing is stored and nothing is in flight, the listener signals
@@ -59,8 +61,14 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   labels, out-of-range sizes, trailing bytes → close 1002; state or
   limit violations and bad signatures → 1008.
 
-## Cost shape (Workers Free)
+## Cost shape
 
-Idle connected devices cost nothing: the object hibernates, WebSocket
-Ping/Pong never reaches it, and there are no alarms, no polling, no
-leases and no rate-limit buckets to charge.
+Idle connected devices cost no Durable Object duration: the object
+hibernates, WebSocket Ping/Pong never reaches it, and there are no
+alarms, no polling, no leases and no rate-limit buckets. That is a
+compute statement, not a total-cost statement. Storage is a separate
+meter: a bound mailbox has a SQLite database even when empty (about 12 KB
+on Cloudflare's published figure), and every stored packet is billed
+until Settle or Revocation. Request, duration, row and storage formulas
+are in `docs/COST.md`; abuse and capacity bounds are in
+`docs/ABUSE-CAPACITY.md`.

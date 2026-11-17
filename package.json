@@ -14,17 +14,19 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/tsconfig.json",
-    "check:scripts": "node --check scripts/station.mjs && node --check scripts/container-healthcheck.mjs && sh -n scripts/container-entrypoint.sh",
+    "check:version": "node scripts/check-version.mjs",
+    "check:scripts": "node --check scripts/station.mjs && node --check scripts/check-version.mjs && node --check scripts/interop.mjs && node --check scripts/container-healthcheck.mjs && sh -n scripts/container-entrypoint.sh",
     "check:generated": "wrangler types apps/station/worker-configuration.d.ts --check -c apps/station/wrangler.jsonc",
     "test": "vitest run",
     "test:workers": "vitest run --project workers",
     "test:core": "vitest run --project core",
     "test:node": "vitest run --project node",
     "station": "node scripts/station.mjs",
+    "interop": "node scripts/interop.mjs",
     "container:up": "docker compose up --build -d",
     "container:down": "docker compose down",
     "dryrun": "wrangler deploy --dry-run -c apps/station/wrangler.jsonc",
-    "check": "npm run typecheck && npm run check:scripts && npm run check:generated && npm run test && npm run dryrun"
+    "check": "npm run check:version && npm run typecheck && npm run check:scripts && npm run check:generated && npm run test && npm run dryrun"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.2",

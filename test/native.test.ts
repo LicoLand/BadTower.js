@@ -94,6 +94,22 @@ describe("native binding admission", () => {
     expect(res.status).toBe(404);
   });
 
+  it("publishes the native contract version as fixed binary fields", async () => {
+    const unauthenticated = await SELF.fetch("https://station.test/v1/native/version");
+    expect(unauthenticated.status).toBe(401);
+    const res = await SELF.fetch("https://station.test/v1/native/version", {
+      headers: auth(randomBytes(16)),
+    });
+    expect(res.status).toBe(200);
+    const body = new Uint8Array(await res.arrayBuffer());
+    expect(body).toHaveLength(8);
+    const view = new DataView(body.buffer, body.byteOffset);
+    expect([view.getUint16(0, false), view.getUint16(2, false), view.getUint16(4, false)]).toEqual([
+      1, 0, 0,
+    ]);
+    expect(view.getUint16(6, false)).toBe(0);
+  });
+
   it("refuses forged or missing credentials on native routes", async () => {
     const bad = `btm1.${Buffer.from(randomBytes(56)).toString("base64url")}`;
     for (const header of [undefined, `Bearer ${bad}`, "Bearer x"]) {

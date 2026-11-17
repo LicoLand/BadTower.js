@@ -46,11 +46,14 @@ Or run it self-hosted in the container: see `docs/OPERATIONS.md`.
 ## Wire (summary)
 
 Native: `https://<station>/v1/native/{reserve,submit,claim,settle}` with
-`Authorization: Bearer btm1.<…>` and fixed binary bodies. LicoArc:
+`Authorization: Bearer btm1.<…>` and fixed binary bodies. The native
+contract is version `1.0`; `GET /v1/native/version` returns
+`major(u16) ‖ minor(u16) ‖ revision(u16) ‖ reserved(u16)`. LicoArc:
 `wss://<station>/v1/mailbox` with `Sec-WebSocket-Protocol:
 licoarc.mailbox.v1`; frames are deterministic-CBOR closed maps:
 CHALLENGE/HELLO/READY, SEND/RESULT, DELIVER/ACK, DRAINED. Full contracts
-in `docs/API.md`; semantics in `ARCHITECTURE.md`.
+in `docs/API.md`; contract change rules in `docs/NATIVE-CONTRACT.md`;
+semantics in `ARCHITECTURE.md`.
 
 ## Operations
 
@@ -63,7 +66,18 @@ See `docs/OPERATIONS.md`.
 
 ```sh
 npm ci
-npm run check   # typecheck + script lint + generated-type check + vitest + wrangler dry-run
+npm run check   # version + typecheck + script lint + generated types + vitest + wrangler dry-run
 ```
+
+`npm run interop` runs the two-endpoint LicoArc scenario against a local
+Station; it needs the published `licoarc-client 0.2.0` binary and
+`openssl`. CI runs the same script.
+
+## Documentation
+
+Start with `docs/PRODUCT.md`, `docs/CONTEXT.md` and `docs/STATUS.md`.
+The wire contract is `docs/API.md`; its version and change rules are
+`docs/NATIVE-CONTRACT.md`. Cost, abuse, operations visibility, offline
+wake and the A2A/MCP plugin pins are in `docs/`.
 
 License: AGPL-3.0-or-later. See `SECURITY.md` for disclosure.

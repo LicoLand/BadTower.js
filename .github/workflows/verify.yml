@@ -19,3 +19,23 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install the published licoarc-client 0.2.0
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 install licoarc-client --version 0.2.0 --locked \
+            --root "$RUNNER_TEMP/licoarc"
+      - name: Run two-endpoint interop against a local Station
+        env:
+          LICOARC_CLIENT: ${{ runner.temp }}/licoarc/bin/licoarc-client
+        run: node scripts/interop.mjs

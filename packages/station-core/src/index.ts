@@ -16,6 +16,8 @@ export {
 export { emptyNoStore, readBoundedBody, secureResponse } from "./http";
 export type { BodyRead } from "./http";
 export {
+  NATIVE_CONTRACT_VERSION,
+  NATIVE_CONTRACT_VERSION_TEXT,
   NATIVE_OUTCOME,
   NATIVE_PATHS,
   NATIVE_REASON,

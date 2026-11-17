@@ -14,6 +14,8 @@
  *   POST /v1/native/settle    body: count(1) ‖ sequence(u64 BE)× → 204 | 403
  *   GET  /v1/native/capacity  → 200 body: capacityBytes(u64 BE) ‖
  *                               databaseBytes(u64 BE) | 403
+ *   GET  /v1/native/version   → 200 body: major(u16 BE) ‖ minor(u16 BE) ‖
+ *                               revision(u16 BE) ‖ reserved(u16 BE)
  *
  * Reserve binds the credential's mailbox to one opaque subject;
  * Submit routes by the handle's first 16 bytes to the target mailbox;
@@ -31,7 +33,23 @@ export const NATIVE_PATHS = {
   claim: "/v1/native/claim",
   settle: "/v1/native/settle",
   capacity: "/v1/native/capacity",
+  version: "/v1/native/version",
 } as const;
+
+/**
+ * The native contract's compatibility identifier. Clients negotiate on
+ * major.minor; revision only records editorial or non-wire corrections.
+ * Changing any of these values requires the same commit to update
+ * docs/API.md, docs/NATIVE-CONTRACT.md and the native version test.
+ */
+export const NATIVE_CONTRACT_VERSION = {
+  major: 1,
+  minor: 0,
+  revision: 0,
+} as const;
+
+export const NATIVE_CONTRACT_VERSION_TEXT =
+  `${NATIVE_CONTRACT_VERSION.major}.${NATIVE_CONTRACT_VERSION.minor}` as const;
 
 export const NATIVE_OUTCOME = { accepted: 0, rejected: 1, transient: 2 } as const;
 export const NATIVE_REASON = {
@@ -93,6 +111,16 @@ function encodeCapacity(capacityBytes: number, databaseBytes: number): Uint8Arra
   return out;
 }
 
+function encodeContractVersion(): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  view.setUint16(0, NATIVE_CONTRACT_VERSION.major, false);
+  view.setUint16(2, NATIVE_CONTRACT_VERSION.minor, false);
+  view.setUint16(4, NATIVE_CONTRACT_VERSION.revision, false);
+  view.setUint16(6, 0, false);
+  return out;
+}
+
 function u64list(bytes: Uint8Array, offset: number, count: number): number[] | null {
   const out: number[] = [];
   for (let i = 0; i < count; i += 1) {
@@ -121,6 +149,12 @@ export async function handleNativeRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const own = () => mailboxFor(admitted.mailboxId);
+
+  if (request.method === "GET" && url.pathname === NATIVE_PATHS.version) {
+    return secureResponse(encodeContractVersion(), {
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+  }
 
   if (request.method === "POST" && url.pathname === NATIVE_PATHS.reserve) {
     const subject = await body(request, SUBJECT_BYTES);

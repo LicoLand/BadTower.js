@@ -18,8 +18,16 @@ HMAC-SHA256(stationKey, "btm1" ‖ mailboxId ‖ notAfter) ) — 56 bytes.
 ## Native contract
 
 Carrier: `https://<station>/v1/native/*`, `Authorization: Bearer btm1.<…>`.
-Bodies are `application/octet-stream`; every response body is the same.
-No response carries error text.
+Bodies are `application/octet-stream`; no response carries error text.
+
+**Contract version: `1.0`.** The compatibility identifier is
+`major.minor`; `GET /v1/native/version` returns it as
+`major(u16 BE) ‖ minor(u16 BE) ‖ revision(u16 BE) ‖ reserved(u16 BE)` —
+8 bytes, `00 01 00 00 00 00 00 00` for `1.0`. It requires the same
+admission credential, does not require a bound mailbox, and does not
+touch storage. The identifier, its queryable location, and the rules for
+major, minor and revision changes are normative in
+[`NATIVE-CONTRACT.md`](NATIVE-CONTRACT.md).
 
 - `POST /v1/native/reserve` — body: subject(32), one fixed-size opaque
   identifier. First call binds the credential's mailbox; the same
@@ -40,6 +48,10 @@ No response carries error text.
   deletes those packets. 204 settled, 403 unbound or revoked.
 - `GET /v1/native/capacity` — 200 body: capacityBytes(u64 BE) ‖
   databaseBytes(u64 BE). 403 while unbound or revoked.
+- `GET /v1/native/version` — 200 body: major(u16 BE) ‖ minor(u16 BE) ‖
+  revision(u16 BE) ‖ reserved(u16 BE); `1.0` is
+  `00 01 00 00 00 00 00 00`. Requires `btm1` admission, does not require
+  a bound mailbox.
 - `POST /v1/revoke` — body: mailboxId(16) ‖ HMAC(stationKey, "btr1" ‖
   mailboxId). Idempotent 204: the mailbox's packets are gone and the
   mailbox can never bind again.

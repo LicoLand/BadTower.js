@@ -118,6 +118,16 @@ const seqList = (sequences: number[]) => {
 const OCTETS = { "Content-Type": "application/octet-stream" };
 
 describe("core + plugin composition", () => {
+  it("serves the native contract version through the composed Worker", async () => {
+    const res = await SELF.fetch("https://station.test/v1/native/version", {
+      headers: bearer(randomBytes(16)),
+    });
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(
+      new Uint8Array([0, 1, 0, 0, 0, 0, 0, 0]),
+    );
+  });
+
   it("delivers a native client's packet to the LicoArc socket and drains after ACK", async () => {
     const mailboxId = randomBytes(16);
     const receiver = await wsReady(mailboxId);
