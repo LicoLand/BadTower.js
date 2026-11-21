@@ -94,7 +94,7 @@ export class Mailbox extends DurableObject<Env> {
       // a bound subject still only faces its subject check.
       const notAfter = Number.isFinite(raw) ? raw : 0;
       if (this.store.canBind(notAfter) === "closed") return emptyNoStore(403);
-      return this.licoarc.accept();
+      return this.licoarc.accept(notAfter);
     });
   }
 
@@ -122,17 +122,17 @@ export class Mailbox extends DurableObject<Env> {
 
   /** Native binding RPC: reserve this mailbox for an opaque subject. */
   async reserve(subject: Uint8Array, notAfter: number): Promise<ReserveResult> {
-    return this.timed("reserve", () => this.store.reserve(subject, notAfter));
+    return this.timed("reserve", () => this.store.reserve(subject, notAfter, "native"));
   }
 
   /** Native binding RPC: claim stored packets in replay order. */
   async claim(excludeSequences: number[], limit: number): Promise<Packet[] | null> {
-    return this.timed("claim", () => this.store.claim(excludeSequences, limit));
+    return this.timed("claim", () => this.store.nativeClaim(excludeSequences, limit));
   }
 
   /** Native binding RPC: settle stored packets by sequence. */
   async settle(sequences: number[]): Promise<boolean> {
-    return this.timed("settle", () => this.store.settle(sequences));
+    return this.timed("settle", () => this.store.nativeSettle(sequences));
   }
 
   /** Native binding RPC: capacity usage for this mailbox. */
@@ -141,7 +141,7 @@ export class Mailbox extends DurableObject<Env> {
     capacityBytes: number;
     databaseBytes: number;
   }> {
-    return this.timed("capacity", () => this.store.capacityInfo());
+    return this.timed("capacity", () => this.store.nativeCapacityInfo());
   }
 
   /** Ops RPC: destroy the mailbox and refuse it forever. */

@@ -223,6 +223,22 @@ describe("mailbox session", () => {
     const readyFrame = await again.events.take();
     expect(readyFrame.type).toBe("frame");
   });
+
+  it("enforces the bind deadline at the durable bind, not only at upgrade", async () => {
+    const mailboxId = randomBytes(16);
+    // The upgrade itself is admitted inside the invitation's deadline…
+    const short = invite(mailboxId, Math.floor(Date.now() / 1000) + 2);
+    const conn = (await connect(short)) as LiveConn;
+    expect(conn.status).toBe(101);
+    const challenge = await conn.events.take();
+    if (challenge.type !== "frame" || challenge.data.kind !== "challenge") throw new Error("no challenge");
+    // …but the challenged socket outlives it: the durable first bind
+    // still refuses the HELLO.
+    await new Promise((r) => setTimeout(r, 2600));
+    const dev = device();
+    conn.ws.send(helloFrame(dev.pub, new Uint8Array(dev.hello(challenge.data.nonce))));
+    expect(await conn.events.take()).toEqual({ type: "close", code: 1008 });
+  }, 15_000);
 });
 
 describe("delivery", () => {

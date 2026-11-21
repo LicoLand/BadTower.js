@@ -9,7 +9,15 @@
  * Packet rows leave only through `settle` or `revoke`: delivery is
  * at-least-once, `claim` replays in sequence order while the caller's
  * in-flight window stays under IN_FLIGHT_WINDOW, and `revoke` destroys
- * the mailbox and refuses it forever.
+ * the mailbox and refuses it forever. Sequences come from a durable,
+ * non-reusing allocator bumped inside the same transaction as the
+ * packet insert, so a settled sequence can never name a newer packet.
+ *
+ * The first binding records which transport bound the mailbox
+ * (`binding.via`). Recipient operations through a native surface are
+ * admitted only for natively bound mailboxes — a listener-bound
+ * mailbox's packets belong to the listener's proven owner, not to
+ * whoever happens to hold a copied admission credential.
  *
  * The store owns only SQLite semantics — connections, listeners and
  * frame grammars belong to whoever composes it.
@@ -19,6 +27,12 @@ import { fromSqliteBlob } from "./encoding";
 export const SUBJECT_BYTES = 32;
 export const IN_FLIGHT_WINDOW = 16;
 export const MAX_PACKET_BYTES = 524288;
+
+/**
+ * The transport a mailbox was first bound through: the station's own
+ * native surface, or a compatibility listener hosted in this object.
+ */
+export type BindingVia = "native" | "listener";
 
 export type ReserveResult =
   | "bound"
@@ -85,6 +99,12 @@ export class MailboxStore {
       "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), subject BLOB, revoked INTEGER NOT NULL DEFAULT 0)",
     );
     this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS binding(id INTEGER PRIMARY KEY CHECK(id = 0), via TEXT NOT NULL)",
+    );
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS alloc(id INTEGER PRIMARY KEY CHECK(id = 0), next INTEGER NOT NULL)",
+    );
+    this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS packet(seq INTEGER PRIMARY KEY, handle BLOB NOT NULL, body BLOB NOT NULL)",
     );
   }
@@ -139,22 +159,51 @@ export class MailboxStore {
   }
 
   /**
-   * Reserve the mailbox for `subject`. First successful call stores the
-   * identifier; a different identifier thereafter is refused. `notAfter`
-   * applies only while the mailbox is unbound.
+   * The transport this mailbox was first bound through, or null while
+   * unbound — including a bound mailbox whose binding predates binding
+   * records, which must not be treated as native.
    */
-  reserve(subject: Uint8Array, notAfterSeconds: number): ReserveResult {
+  boundVia(): BindingVia | null {
+    if (!this.bound()) return null;
+    try {
+      const rows = this.ctx.storage.sql
+        .exec("SELECT via FROM binding WHERE id = 0")
+        .toArray();
+      this.meter()?.rowsRead("binding", rows.length);
+      const via = (rows[0] as { via: unknown } | undefined)?.via;
+      return via === "native" || via === "listener" ? via : null;
+    } catch {
+      // Bound before binding records existed: unknown, not native.
+      return null;
+    }
+  }
+
+  /**
+   * Reserve the mailbox for `subject` through transport `via`. First
+   * successful call stores the identifier and the binding transport
+   * atomically; a different identifier thereafter is refused.
+   * `notAfter` applies only while the mailbox is unbound.
+   */
+  reserve(
+    subject: Uint8Array,
+    notAfterSeconds: number,
+    via: BindingVia,
+  ): ReserveResult {
     if (subject.length !== SUBJECT_BYTES) throw new Error("invalid subject size");
     const meta = this.loadMeta();
     if (meta.revoked) return "revoked";
     if (meta.subject === null) {
       if (Math.floor(Date.now() / 1000) >= notAfterSeconds) return "bind-window-closed";
       this.createSchema();
-      this.ctx.storage.sql.exec(
-        "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
-        owned(subject),
-      );
-      this.meter()?.rowsWritten("reserve", 1);
+      const sql = this.ctx.storage.sql;
+      this.ctx.storage.transactionSync(() => {
+        sql.exec(
+          "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
+          owned(subject),
+        );
+        sql.exec("INSERT INTO binding(id, via) VALUES(0, ?)", via);
+      });
+      this.meter()?.rowsWritten("reserve", 2);
       this.meta = { subject: subject.slice(), revoked: false };
       this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
       return "bound";
@@ -183,6 +232,12 @@ export class MailboxStore {
    * or beyond the plan's per-object limit — maps to the same stable
    * transient answer. Already stored packets are never touched by
    * either path.
+   *
+   * The sequence is allocated inside the same transaction from a
+   * durable allocator row, seeded from the live maximum on first use,
+   * so a delayed or retried settle can never remove a newer packet
+   * under a reused sequence. A rolled-back attempt leaves the
+   * allocator untouched: the sequence was never assigned.
    */
   submit(handle: Uint8Array, body: Uint8Array): SubmitResult {
     const meta = this.loadMeta();
@@ -192,8 +247,35 @@ export class MailboxStore {
     const sql = this.ctx.storage.sql;
     try {
       return this.ctx.storage.transactionSync(() => {
-        sql.exec("INSERT INTO packet(handle, body) VALUES(?, ?)", owned(handle), owned(body));
+        // The allocator is lazily created here rather than at bind so
+        // mailboxes bound before it existed get the same non-reusing
+        // sequences.
+        sql.exec(
+          "CREATE TABLE IF NOT EXISTS alloc(id INTEGER PRIMARY KEY CHECK(id = 0), next INTEGER NOT NULL)",
+        );
+        let row = sql
+          .exec("SELECT next FROM alloc WHERE id = 0")
+          .toArray()[0] as { next: number } | undefined;
+        let seeded = 0;
+        if (row === undefined) {
+          sql.exec(
+            "INSERT INTO alloc(id, next) SELECT 0, COALESCE(MAX(seq), 0) + 1 FROM packet",
+          );
+          seeded = 1;
+          row = sql
+            .exec("SELECT next FROM alloc WHERE id = 0")
+            .toArray()[0] as { next: number };
+        }
+        sql.exec("UPDATE alloc SET next = ? WHERE id = 0", row.next + 1);
+        sql.exec(
+          "INSERT INTO packet(seq, handle, body) VALUES(?, ?, ?)",
+          row.next,
+          owned(handle),
+          owned(body),
+        );
         if (sql.databaseSize > this.capacityBytes()) throw new CapacityExceeded();
+        this.meter()?.rowsRead("alloc", 1 + seeded);
+        this.meter()?.rowsWritten("alloc", seeded + 1);
         this.meter()?.rowsWritten("submit", 1);
         this.meter()?.observeStorage(sql.databaseSize);
         return { outcome: "accepted" };
@@ -232,6 +314,31 @@ export class MailboxStore {
       handle: fromSqliteBlob(row.handle),
       body: fromSqliteBlob(row.body),
     }));
+  }
+
+  /**
+   * Recipient operations through a native surface. A mailbox bound
+   * through a compatibility listener admits them only to that
+   * listener's proven owner, so the native surface answers exactly as
+   * it does for an unbound mailbox; sending stays open to every
+   * admitted caller on either transport.
+   */
+  nativeClaim(excludeSequences: number[], limit: number): Packet[] | null {
+    return this.boundVia() === "native" ? this.claim(excludeSequences, limit) : null;
+  }
+
+  nativeSettle(sequences: number[]): boolean {
+    return this.boundVia() === "native" ? this.settle(sequences) : false;
+  }
+
+  nativeCapacityInfo(): {
+    bound: boolean;
+    capacityBytes: number;
+    databaseBytes: number;
+  } {
+    return this.boundVia() === "native"
+      ? this.capacityInfo()
+      : { bound: false, capacityBytes: 0, databaseBytes: 0 };
   }
 
   /**

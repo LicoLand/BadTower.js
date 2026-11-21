@@ -29,7 +29,10 @@ const BIND_NOT_AFTER_HEADER = "x-badtower-bind-not-after";
 let credentials: StationCredentials | null = null;
 
 function admission(env: Env): StationCredentials {
-  credentials ??= new StationCredentials(env.BADTOWER_STATION_KEY);
+  credentials ??= new StationCredentials(
+    env.BADTOWER_STATION_KEY,
+    env.BADTOWER_METRICS_KEY,
+  );
   return credentials;
 }
 

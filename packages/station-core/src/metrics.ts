@@ -31,6 +31,8 @@ export type Operation = (typeof OPERATIONS)[number];
 
 export const STORE_OPERATIONS = [
   "meta",
+  "binding",
+  "alloc",
   "reserve",
   "submit",
   "claim",

@@ -43,11 +43,15 @@ major, minor and revision changes are normative in
   sequence(u64 BE)×, the caller's still-in-flight sequences.
   200 body: count(1) ‖ [sequence(u64 BE) ‖ handle(32) ‖
   length(u32 BE) ‖ body]× in replay order. 403 while the mailbox is
-  unbound or revoked.
+  unbound, revoked, or bound through a compatibility listener — the
+  bound owner admits recipient operations only through its binding
+  transport.
 - `POST /v1/native/settle` — body: count(1) ‖ sequence(u64 BE)× —
-  deletes those packets. 204 settled, 403 unbound or revoked.
+  deletes those packets. 204 settled, 403 unbound, revoked, or bound
+  through a compatibility listener.
 - `GET /v1/native/capacity` — 200 body: capacityBytes(u64 BE) ‖
-  databaseBytes(u64 BE). 403 while unbound or revoked.
+  databaseBytes(u64 BE). 403 while unbound, revoked, or bound through
+  a compatibility listener.
 - `GET /v1/native/version` — 200 body: major(u16 BE) ‖ minor(u16 BE) ‖
   revision(u16 BE) ‖ reserved(u16 BE); `1.0` is
   `00 01 00 00 00 00 00 00`. Requires `btm1` admission, does not require
@@ -57,14 +61,22 @@ major, minor and revision changes are normative in
   mailbox can never bind again.
 - `GET /v1/metrics` — operator-only aggregate cost meters in
   Prometheus text exposition. `Authorization: Bearer <station key>`
-  (the same base64url key `station.mjs init` writes), 401 otherwise.
-  Series are labelled only by the closed `operation`, `direction` and
-  `plan` sets — no mailbox id, handle, subject, IP, path or content.
+  or the metrics-only key (`station.mjs` writes both as base64url),
+  401 otherwise. Series are labelled only by the closed `operation`,
+  `direction` and `plan` sets — no mailbox id, handle, subject, IP,
+  path or content.
 - `GET /healthz` — unauthenticated liveness.
 
 Claimed-but-unsettled packets replay on the next claim — delivery is
 at-least-once. The caller owns its in-flight set and passes it as the
-exclude list.
+exclude list. Packet sequences are allocated from a durable,
+non-reusing counter: a settled sequence never names a newer packet.
+
+Recipient operations are scoped to the binding transport: a mailbox
+bound through a compatibility listener answers 403 to native claim,
+settle and capacity — the admission credential alone is not the bound
+owner. Submit stays open cross-transport: any admitted caller may
+send to any bound mailbox.
 
 ## LicoArc mailbox listener
 

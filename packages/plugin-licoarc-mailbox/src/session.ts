@@ -38,7 +38,7 @@ const FAIL_MAILBOX_FULL = 3;
 const FAIL_INTERNAL_UNAVAILABLE = 4;
 
 type Attachment =
-  | { state: "challenged"; nonce: Uint8Array }
+  | { state: "challenged"; nonce: Uint8Array; notAfter: number }
   | { state: "ready"; inflight: number[] };
 
 export type LicoArcMailboxDeps = {
@@ -104,14 +104,18 @@ export class LicoArcMailbox {
     }
   }
 
-  /** Accept an admitted upgrade: issue the challenge on the new socket. */
-  accept(): Response {
+  /**
+   * Accept an admitted upgrade: issue the challenge on the new socket.
+   * The verified bind deadline rides in the attachment so a challenged
+   * socket cannot outlive it and bind afterwards.
+   */
+  accept(notAfter: number): Response {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     this.deps.ctx.acceptWebSocket(server, [SUBPROTOCOL]);
     const nonce = crypto.getRandomValues(new Uint8Array(32));
-    server.serializeAttachment({ state: "challenged", nonce } satisfies Attachment);
+    server.serializeAttachment({ state: "challenged", nonce, notAfter } satisfies Attachment);
     this.send(server, { kind: "challenge", nonce });
     return new Response(null, {
       status: 101,
@@ -188,11 +192,14 @@ export class LicoArcMailbox {
       this.close(ws, CLOSE_POLICY);
       return;
     }
-    // The upgrade gate already proved the bind window; HELLO binds the
-    // verified device key as this mailbox's opaque subject.
+    // HELLO binds the verified device key as this mailbox's opaque
+    // subject; the durable bind still enforces the invitation's
+    // deadline carried in the attachment, while an already-bound
+    // subject faces only its subject check.
     const reserved = this.deps.store.reserve(
       frame.deviceKey,
-      Number.MAX_SAFE_INTEGER,
+      attachment.notAfter ?? 0,
+      "listener",
     );
     if (reserved === "subject-mismatch") {
       this.close(ws, CLOSE_SUBJECT_MISMATCH);

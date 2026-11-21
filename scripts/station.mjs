@@ -6,11 +6,13 @@
  *
  *   init --dir DIR
  *   invite --dir DIR [--bind-within 7d] [--out FILE]
+ *   metrics-key --dir DIR
  *   revoke --dir DIR --station URL --mailbox HEX [--ca PEM]
  *   tls --dir DIR --ip ADDR [--dns NAME]
  *   cloudflare-deploy --dir DIR [--domain NAME]
  *   docker-deploy --ssh HOST --dir DIR --listen IP:PORT [--remote-dir PATH]
  *   health --station URL [--ca PEM]
+ *   metrics --dir DIR --station URL [--ca PEM]
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHmac, randomBytes, webcrypto } from "node:crypto";
@@ -39,6 +41,7 @@ function fromBase64Url(text) {
 }
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_REAL = fs.realpathSync(REPO);
 // Repository-relative roots that both .gitignore and .dockerignore
 // exclude — the only places private material may be written in-tree.
 const REPO_PRIVATE_DIRS = ["data", "secrets"];
@@ -49,17 +52,45 @@ function fail(message) {
 }
 
 /**
+ * The physical path `target` resolves to: the destination may not
+ * exist yet, so the deepest existing ancestor is resolved through
+ * symlinks and the remainder re-appended. A symlinked ancestor cannot
+ * smuggle private material back into the tracked tree.
+ */
+function physicalPath(target) {
+  let at = target;
+  const tail = [];
+  while (!fs.existsSync(at)) {
+    const parent = path.dirname(at);
+    if (parent === at) break;
+    tail.unshift(path.basename(at));
+    at = parent;
+  }
+  try {
+    return path.join(fs.realpathSync(at), ...tail);
+  } catch (error) {
+    fail(`cannot resolve ${target}: ${error.message}`);
+  }
+}
+
+/**
  * Private material must never land at an arbitrary repository-relative
- * path: anything inside the repository that is not under an
- * ignore-covered private root is refused outright.
+ * path: anything inside the repository — lexically or through a
+ * symlinked ancestor — that is not under an ignore-covered private
+ * root is refused outright.
  */
 function privateOutput(file) {
   const resolved = path.resolve(file);
-  const relative = path.relative(REPO, resolved);
-  if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
-    const first = relative.split(path.sep)[0];
-    if (!REPO_PRIVATE_DIRS.includes(first)) {
-      fail(`${file} is inside the repository; private material goes under ${REPO_PRIVATE_DIRS.join("/ or ")}/ or outside the tree`);
+  for (const [candidate, root] of [
+    [resolved, REPO],
+    [physicalPath(resolved), REPO_REAL],
+  ]) {
+    const relative = path.relative(root, candidate);
+    if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+      const first = relative.split(path.sep)[0];
+      if (!REPO_PRIVATE_DIRS.includes(first)) {
+        fail(`${file} is inside the repository; private material goes under ${REPO_PRIVATE_DIRS.join("/ or ")}/ or outside the tree`);
+      }
     }
   }
   return resolved;
@@ -86,6 +117,14 @@ function stationKey(dir) {
   const key = fromBase64Url(raw);
   if (key.length !== 32) fail("station.key is not a 32-byte key");
   return key;
+}
+
+/** A key file read as text for an in-process Authorization header. */
+function readKeyText(file) {
+  const raw = fs.readFileSync(file, "utf8").trim();
+  const key = fromBase64Url(raw);
+  if (key.length !== 32) fail(`${file} is not a 32-byte key`);
+  return raw;
 }
 
 function hmac(key, ...parts) {
@@ -145,8 +184,13 @@ function cmdInit({ flags }) {
   if (fs.existsSync(dir)) fail(`${dir} already exists; refusing to overwrite`);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const key = toBase64Url(randomBytes(32));
+  const metricsKey = toBase64Url(randomBytes(32));
   writePrivate(path.join(dir, "station.key"), `${key}\n`);
-  writePrivate(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`);
+  writePrivate(path.join(dir, "metrics.key"), `${metricsKey}\n`);
+  writePrivate(
+    path.join(dir, ".dev.vars"),
+    `BADTOWER_STATION_KEY=${key}\nBADTOWER_METRICS_KEY=${metricsKey}\n`,
+  );
   console.log(`station initialized at ${dir}`);
 }
 
@@ -166,6 +210,28 @@ function cmdInvite({ flags }) {
   writePrivate(out, `${token}\n`);
   console.log(`mailbox ${mailboxId.toString("hex")}`);
   console.log(`invitation written to ${out}`);
+}
+
+/**
+ * Mint the metrics-only credential for a directory initialized before
+ * it existed: writes metrics.key (refusing to overwrite) and records
+ * BADTOWER_METRICS_KEY in .dev.vars unless already present.
+ */
+function cmdMetricsKey({ flags }) {
+  const dir = privateOutput(flags.dir ?? fail("--dir required"));
+  const file = path.join(dir, "metrics.key");
+  if (fs.existsSync(file)) fail(`${file} already exists; refusing to overwrite`);
+  const key = toBase64Url(randomBytes(32));
+  writePrivate(file, `${key}\n`);
+  const varsFile = path.join(dir, ".dev.vars");
+  const line = `BADTOWER_METRICS_KEY=${key}\n`;
+  if (fs.existsSync(varsFile)) {
+    const current = fs.readFileSync(varsFile, "utf8");
+    if (!/^BADTOWER_METRICS_KEY=/m.test(current)) fs.appendFileSync(varsFile, line);
+  } else {
+    writePrivate(varsFile, line);
+  }
+  console.log(`metrics credential written to ${file}`);
 }
 
 // IP-literal station hosts bypass the environment proxy; hostname
@@ -229,6 +295,37 @@ async function cmdHealth({ flags }) {
   });
   if (status !== 200) fail(`health check failed with status ${status}`);
   console.log("station healthy");
+}
+
+/**
+ * Read the aggregate metrics. The credential is read from disk inside
+ * this process — metrics.key when present, station.key otherwise — so
+ * it never appears in a command line or process listing.
+ */
+async function cmdMetrics({ flags }) {
+  const dir = flags.dir ?? fail("--dir required");
+  const scoped = path.join(dir, "metrics.key");
+  const bearer = readKeyText(fs.existsSync(scoped) ? scoped : path.join(dir, "station.key"));
+  const station = new URL(flags.station ?? fail("--station required"));
+  const options = {
+    agent: directAgentIfIp(station),
+    hostname: station.hostname,
+    port: station.port || 443,
+    path: "/v1/metrics",
+    headers: { Authorization: `Bearer ${bearer}` },
+    rejectUnauthorized: true,
+  };
+  if (flags.ca !== undefined) options.ca = fs.readFileSync(flags.ca);
+  const { status, body } = await new Promise((resolve, reject) => {
+    let data = "";
+    https.get(options, (res) => {
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+    }).on("error", reject);
+  });
+  if (status !== 200) fail(`metrics request failed with status ${status}`);
+  process.stdout.write(body);
 }
 
 function cmdTls({ flags }) {
@@ -341,11 +438,13 @@ async function cmdDockerDeploy({ flags }) {
 const commands = {
   init: (a) => cmdInit(a),
   invite: (a) => cmdInvite(a),
+  "metrics-key": (a) => cmdMetricsKey(a),
   revoke: async (a) => cmdRevoke(a),
   tls: (a) => cmdTls(a),
   "cloudflare-deploy": (a) => cmdCloudflareDeploy(a),
   "docker-deploy": async (a) => cmdDockerDeploy(a),
   health: async (a) => cmdHealth(a),
+  metrics: async (a) => cmdMetrics(a),
 };
 
 const [command, ...rest] = process.argv.slice(2);

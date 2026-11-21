@@ -9,8 +9,9 @@ All privileged material lives in a private directory you pass with
 npm run station -- init --dir ~/private/badtower
 ```
 
-Creates `station.key` (32-byte base64url, 0600) and `.dev.vars` for
-`wrangler dev` / the container. Refuses to overwrite.
+Creates `station.key` (32-byte base64url, 0600), `metrics.key` (the
+metrics-only credential, 0600) and `.dev.vars` for `wrangler dev` /
+the container. Refuses to overwrite.
 
 ## Invitations
 
@@ -98,9 +99,18 @@ npm run station -- health --station https://station.example [--ca PEM]
 operator-only:
 
 ```sh
-curl -H "Authorization: Bearer $(cat <dir>/station.key)" \
-  --cacert <dir>/tls/ca.crt https://station.example/v1/metrics
+npm run station -- metrics --dir ~/private/badtower --station https://station.example [--ca PEM]
 ```
+
+The command reads the credential from disk inside the process —
+`metrics.key` when present, `station.key` otherwise — so it never
+appears in a command line or process listing. `metrics.key` is a
+separate metrics-only credential (`BADTOWER_METRICS_KEY` in
+`.dev.vars`): it admits this one route and cannot mint, bind, claim
+or revoke, so scraping infrastructure never needs the station key.
+Directories initialized before it existed mint it with
+`npm run station -- metrics-key --dir <dir>` (then deploy the new
+`BADTOWER_METRICS_KEY` line from `.dev.vars` as a secret).
 
 Values are per-isolate aggregates for reconciliation against
 Cloudflare's own usage record, which remains authoritative (see

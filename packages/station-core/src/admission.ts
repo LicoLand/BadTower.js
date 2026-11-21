@@ -31,8 +31,13 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
 export class StationCredentials {
   private imported: Promise<CryptoKey> | null = null;
   private rawKey: Uint8Array | null = null;
+  private metricsKeyLoaded = false;
+  private metricsRaw: Uint8Array | null = null;
 
-  constructor(private readonly encodedKey: string) {}
+  constructor(
+    private readonly encodedKey: string,
+    private readonly encodedMetricsKey?: string | undefined,
+  ) {}
 
   private raw(): Uint8Array {
     if (this.rawKey === null) {
@@ -41,6 +46,22 @@ export class StationCredentials {
       this.rawKey = raw;
     }
     return this.rawKey;
+  }
+
+  /**
+   * The optional metrics-only credential: a second 32-byte base64url
+   * secret whose only authority is reading `GET /v1/metrics`. An unset
+   * or malformed value carries no authority at all.
+   */
+  private metrics(): Uint8Array | null {
+    if (!this.metricsKeyLoaded) {
+      this.metricsKeyLoaded = true;
+      if (this.encodedMetricsKey !== undefined && this.encodedMetricsKey !== "") {
+        const raw = decodeBase64Url(this.encodedMetricsKey);
+        this.metricsRaw = raw !== null && raw.length === 32 ? raw : null;
+      }
+    }
+    return this.metricsRaw;
   }
 
   private key(): Promise<CryptoKey> {
@@ -90,16 +111,18 @@ export class StationCredentials {
 
   /**
    * Verify the operator credential that guards the aggregate-metrics
-   * route: `Authorization: Bearer <station key>` in the same base64url
-   * encoding `station.mjs init` writes, compared in constant time. The
-   * station key is the operator's own secret; this surface exists only
-   * for whoever already holds it.
+   * route: `Authorization: Bearer <station key>` or the metrics-only
+   * key, each in the same base64url encoding `station.mjs init` writes,
+   * compared in constant time. The metrics key admits this route alone
+   * — it cannot mint, bind, claim or revoke.
    */
   verifyOperator(header: string | null): boolean {
     const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
     const raw = decodeBase64Url(token);
     if (raw === null) return false;
-    return equalBytes(raw, this.raw());
+    if (equalBytes(raw, this.raw())) return true;
+    const metrics = this.metrics();
+    return metrics !== null && equalBytes(raw, metrics);
   }
 
   /**

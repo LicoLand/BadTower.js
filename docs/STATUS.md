@@ -53,7 +53,8 @@ Implemented in this repository:
 - Measured capacity accounting: submit judges the post-insert
   `databaseSize` inside a transaction (row overhead and page growth
   counted), and `SQLITE_FULL` maps to the transient `mailbox-full`.
-- Aggregate cost meters at `GET /v1/metrics` (station-key bearer):
+- Aggregate cost meters at `GET /v1/metrics` (station-key or
+  metrics-only bearer):
   Worker/DO requests, DO active duration, SQLite rows read/written and
   stored bytes, labelled only by `operation`/`direction`/`plan`.
 - Design documents: `PLUGIN-A2A.md`, `PLUGIN-MCP.md`,
@@ -148,7 +149,8 @@ privacy properties, or any cluster behavior.
 - `wrangler.jsonc` still sets `observability.enabled: false` and
   `logs.enabled: false`. There is no per-mailbox inventory and no
   abandoned-mailbox sweep. The cost-dimension meters are exported at
-  `GET /v1/metrics` for the station key's holder; the rest of the
+  `GET /v1/metrics` for the holder of the station key or the
+  metrics-only key; the rest of the
   catalogue in `OPERATIONS-VISIBILITY.md` is not built.
 - Cost: the official inputs and formulas are in `COST.md`, read from
   Cloudflare documentation on 2026-11-16. No invoice, spend forecast, or

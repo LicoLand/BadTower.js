@@ -1,6 +1,7 @@
 /**
  * The operator metrics surface: aggregate cost dimensions from
- * docs/COST.md exported over GET /v1/metrics behind the station key.
+ * docs/COST.md exported over GET /v1/metrics behind the station key or
+ * the metrics-only credential.
  * The assertions pin two contract properties: every cost dimension is
  * present as an aggregate, and nothing exported can name a mailbox,
  * handle, subject, address, path, IP or content.
@@ -39,6 +40,21 @@ describe("GET /v1/metrics", () => {
       headers: { Authorization: `Bearer ${wrong}` },
     });
     expect(res.status).toBe(401);
+  });
+
+  it("admits the metrics-only credential, which carries no other authority", async () => {
+    const res = await SELF.fetch("https://station.test/v1/metrics", {
+      headers: { Authorization: `Bearer ${env.BADTOWER_METRICS_KEY}` },
+    });
+    expect(res.status).toBe(200);
+    // The metrics key is not a btm1 admission credential — a mailbox
+    // route refuses it like any other malformed bearer.
+    const reserve = await SELF.fetch("https://station.test/v1/native/reserve", {
+      method: "POST",
+      headers: { ...OCTETS, Authorization: `Bearer ${env.BADTOWER_METRICS_KEY}` },
+      body: rb(32),
+    });
+    expect(reserve.status).toBe(401);
   });
 
   it("exports every cost dimension as bounded-label aggregates", async () => {

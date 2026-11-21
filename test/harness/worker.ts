@@ -44,15 +44,15 @@ export class CoreMailbox extends DurableObject<HarnessEnv> {
   }
 
   async reserve(subject: Uint8Array, notAfter: number): Promise<ReserveResult> {
-    return this.store.reserve(subject, notAfter);
+    return this.store.reserve(subject, notAfter, "native");
   }
 
   async claim(excludeSequences: number[], limit: number): Promise<Packet[] | null> {
-    return this.store.claim(excludeSequences, limit);
+    return this.store.nativeClaim(excludeSequences, limit);
   }
 
   async settle(sequences: number[]): Promise<boolean> {
-    return this.store.settle(sequences);
+    return this.store.nativeSettle(sequences);
   }
 
   async capacityInfo(): Promise<{
@@ -60,7 +60,7 @@ export class CoreMailbox extends DurableObject<HarnessEnv> {
     capacityBytes: number;
     databaseBytes: number;
   }> {
-    return this.store.capacityInfo();
+    return this.store.nativeCapacityInfo();
   }
 
   async revoke(): Promise<void> {

@@ -25,10 +25,12 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   requests. `POST /v1/revoke` verifies a separate `btr1`-domain HMAC
   body and calls `revoke()`.
 - **Mailbox DO (per mailbox id)**: the core `MailboxStore` owns the
-  SQLite tables `meta` (bound opaque subject identifier, revoked flag)
-  and `packet` (sequence, handle, body). The plugin session owns the
-  WebSocket attachments; all session state lives there, so the object
-  hibernates freely. Core and plugin share no tables.
+  SQLite tables `meta` (bound opaque subject identifier, revoked flag),
+  `binding` (which transport bound the mailbox), `alloc` (durable
+  non-reusing packet sequence) and `packet` (sequence, handle, body).
+  The plugin session owns the WebSocket attachments; all session state
+  lives there, so the object hibernates freely. Core and plugin share
+  no tables.
 - **Offline minting**: `scripts/station.mjs` creates credentials —
   `btm1.<base64url>` = mailboxId ‖ notAfter ‖ HMAC(key, "btm1" ‖ …), and
   the revoke body = mailboxId ‖ HMAC(key, "btr1" ‖ mailboxId). `notAfter`
@@ -49,7 +51,14 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
 - Delivery is at-least-once with a 16-packet in-flight window; settle
   deletes the row. Unsettled packets replay in sequence order. When
   nothing is stored and nothing is in flight, the listener signals
-  drained.
+  drained. Sequences come from a durable, non-reusing allocator bumped
+  inside the packet transaction, so a delayed or retried settle can
+  never remove a newer packet under a reused sequence.
+- Recipient operations are scoped to the binding transport: the first
+  binding records whether the mailbox bound natively or through a
+  compatibility listener, and a listener-bound mailbox answers 403 to
+  native claim, settle and capacity — the `btm1` credential alone is
+  not the bound owner. Submit stays open cross-transport.
 - Submit targets any mailbox id (the first 16 handle bytes); the store
   rejects unbound/revoked mailboxes and answers transient mailboxFull
   when the measured `ctx.storage.sql.databaseSize` after the insert
@@ -60,8 +69,9 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   limit set validated at startup (per-object 1 GB / 10 GB); a mailbox
   capacity above the plan's per-object limit refuses to run.
 - Every Worker request and mailbox operation feeds the aggregate cost
-  meters exported to the operator at `GET /v1/metrics` (station-key
-  bearer): request, duration, row and storage aggregates by `operation`
+  meters exported to the operator at `GET /v1/metrics` (station-key or
+  metrics-only bearer): request, duration, row and storage aggregates
+  by `operation`
   and `plan` only — never a mailbox id, handle, subject or content.
 - The LicoArc listener admits one live connection per mailbox: a new
   READY supersedes older ready sockets (4000). Revocation deletes

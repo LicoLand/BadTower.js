@@ -6,6 +6,7 @@ import { defineConfig } from "vitest/config";
 // project gets its own key so suites cannot share secrets by accident.
 const projectBindings = () => ({
   BADTOWER_STATION_KEY: randomBytes(32).toString("base64url"),
+  BADTOWER_METRICS_KEY: randomBytes(32).toString("base64url"),
   BADTOWER_PLAN: "free",
   BADTOWER_MAILBOX_CAPACITY_BYTES: "1000000000",
   BADTOWER_ALLOW_PLAINTEXT: "false",

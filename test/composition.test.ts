@@ -148,10 +148,54 @@ describe("core + plugin composition", () => {
     receiver.ws.close();
   });
 
+  it("refuses native recipient operations on a listener-bound mailbox while keeping submit open", async () => {
+    const mailboxId = randomBytes(16);
+    const receiver = await wsReady(mailboxId);
+    // A copied admission credential is not the bound owner: native
+    // claim, settle and capacity answer exactly as they do for an
+    // unbound mailbox — 403, no packets, no metadata.
+    const claim = await SELF.fetch("https://station.test/v1/native/claim", {
+      method: "POST",
+      headers: { ...OCTETS, ...bearer(mailboxId) },
+      body: new Uint8Array([16, 0]),
+    });
+    expect(claim.status).toBe(403);
+    const settle = await SELF.fetch("https://station.test/v1/native/settle", {
+      method: "POST",
+      headers: { ...OCTETS, ...bearer(mailboxId) },
+      body: seqList([1]),
+    });
+    expect(settle.status).toBe(403);
+    const capacity = await SELF.fetch("https://station.test/v1/native/capacity", {
+      headers: bearer(mailboxId),
+    });
+    expect(capacity.status).toBe(403);
+    // Submit stays open cross-transport: the bound listener still gets it.
+    const packet = randomBytes(24);
+    const submit = await SELF.fetch("https://station.test/v1/native/submit", {
+      method: "POST",
+      headers: { ...OCTETS, ...bearer(randomBytes(16)) },
+      body: Buffer.concat([Buffer.from(handleFor(mailboxId)), packet]),
+    });
+    expect(submit.status).toBe(200);
+    const deliver = await takeFrame(receiver.events, "deliver");
+    if (deliver.kind !== "deliver") throw new Error("unreachable");
+    expect(new Uint8Array(deliver.packet)).toEqual(new Uint8Array(packet));
+    receiver.ws.send(encodeClientFrame({ kind: "ack", sequence: deliver.sequence }));
+    await takeFrame(receiver.events, "drained");
+    receiver.ws.close();
+  });
+
   it("lets a native client claim and settle a packet sent over the LicoArc socket", async () => {
     const mailboxId = randomBytes(16);
-    // The mailbox must exist for submit to accept: bind it over the wire.
-    const owner = await wsReady(mailboxId);
+    // Bind the receiving mailbox natively; its recipient surface then
+    // stays native. The mailbox must exist for submit to accept.
+    const reserve = await SELF.fetch("https://station.test/v1/native/reserve", {
+      method: "POST",
+      headers: { ...OCTETS, ...bearer(mailboxId) },
+      body: randomBytes(32),
+    });
+    expect(reserve.status).toBe(200);
     const sender = await wsReady(randomBytes(16));
     const packet = randomBytes(24);
     sender.ws.send(encodeClientFrame({
@@ -164,7 +208,6 @@ describe("core + plugin composition", () => {
     if (result.kind !== "result") throw new Error("unreachable");
     expect(result.outcome).toBe(0);
     sender.ws.close();
-    owner.ws.close();
 
     const claim = await SELF.fetch("https://station.test/v1/native/claim", {
       method: "POST",

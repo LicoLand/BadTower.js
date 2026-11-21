@@ -30,9 +30,10 @@ npm run station -- init --dir <private-dir>
 npm run station -- cloudflare-deploy --dir <private-dir> [--domain <name>]
 ```
 
-`init` creates the 32-byte station key and `.dev.vars` in your private
-directory; `cloudflare-deploy` uploads that key as the
-`BADTOWER_STATION_KEY` secret and deploys the Worker in one step.
+`init` creates the 32-byte station key, the metrics-only key and
+`.dev.vars` in your private directory; `cloudflare-deploy` uploads
+them as the `BADTOWER_STATION_KEY` and `BADTOWER_METRICS_KEY` secrets
+and deploys the Worker in one step.
 
 Or deploy with the button:
 

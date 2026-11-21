@@ -15,32 +15,38 @@ const ROW_OVERHEAD = 64; // cell header + handle index slack, per packet row
 class FakeSql {
   tables = new Set<string>();
   meta: { subject: ArrayBuffer | null; revoked: number } | null = null;
+  binding: string | null = null;
+  allocNext: number | undefined = undefined;
   packets = new Map<number, { handle: ArrayBuffer; body: ArrayBuffer }>();
-  nextSeq = 1;
   payloadBytes = 0;
   fullAt = Number.POSITIVE_INFINITY;
 
   reset(): void {
     this.tables.clear();
     this.meta = null;
+    this.binding = null;
+    this.allocNext = undefined;
     this.packets.clear();
-    this.nextSeq = 1;
     this.payloadBytes = 0;
   }
 
   /** transactionSync semantics: run the closure, roll back on throw. */
   run<T>(fn: () => T): T {
     const snapshot = {
+      meta: this.meta,
+      binding: this.binding,
+      allocNext: this.allocNext,
       packets: new Map(this.packets),
       payloadBytes: this.payloadBytes,
-      nextSeq: this.nextSeq,
     };
     try {
       return fn();
     } catch (error) {
+      this.meta = snapshot.meta;
+      this.binding = snapshot.binding;
+      this.allocNext = snapshot.allocNext;
       this.packets = snapshot.packets;
       this.payloadBytes = snapshot.payloadBytes;
-      this.nextSeq = snapshot.nextSeq;
       throw error;
     }
   }
@@ -58,7 +64,7 @@ class FakeSql {
   exec(query: string, ...params: unknown[]): { toArray(): unknown[] } {
     const sql = query.replace(/\s+/g, " ").trim();
     if (sql.startsWith("CREATE TABLE")) {
-      this.tables.add(/meta\(/.test(sql) ? "meta" : "packet");
+      this.tables.add(/^CREATE TABLE IF NOT EXISTS (\w+)/.exec(sql)![1]!);
       return { toArray: () => [] };
     }
     if (sql === "SELECT subject, revoked FROM meta WHERE id = 0") {
@@ -72,16 +78,39 @@ class FakeSql {
         : { subject: params[0] as ArrayBuffer, revoked: 0 };
       return { toArray: () => [] };
     }
+    if (sql.startsWith("INSERT INTO binding")) {
+      this.require("binding");
+      this.binding = params[0] as string;
+      return { toArray: () => [] };
+    }
+    if (sql === "SELECT via FROM binding WHERE id = 0") {
+      this.require("binding");
+      return { toArray: () => (this.binding === null ? [] : [{ via: this.binding }]) };
+    }
+    if (sql === "SELECT next FROM alloc WHERE id = 0") {
+      this.require("alloc");
+      return { toArray: () => (this.allocNext === undefined ? [] : [{ next: this.allocNext }]) };
+    }
+    if (sql.startsWith("INSERT INTO alloc")) {
+      this.require("alloc");
+      this.allocNext = Math.max(0, ...this.packets.keys()) + 1;
+      return { toArray: () => [] };
+    }
+    if (sql.startsWith("UPDATE alloc SET next = ?")) {
+      this.require("alloc");
+      this.allocNext = params[0] as number;
+      return { toArray: () => [] };
+    }
     if (sql.startsWith("INSERT INTO packet")) {
       this.require("packet");
-      const handle = params[0] as ArrayBuffer;
-      const body = params[1] as ArrayBuffer;
+      const seq = params[0] as number;
+      const handle = params[1] as ArrayBuffer;
+      const body = params[2] as ArrayBuffer;
       const projected = D0 + Math.ceil((this.payloadBytes + handle.byteLength + body.byteLength + ROW_OVERHEAD) / PAGE) * PAGE;
       if (projected > this.fullAt) {
         throw new Error("SQLITE_FULL: database or disk is full");
       }
-      this.packets.set(this.nextSeq, { handle, body });
-      this.nextSeq += 1;
+      this.packets.set(seq, { handle, body });
       this.payloadBytes += handle.byteLength + body.byteLength + ROW_OVERHEAD;
       return { toArray: () => [] };
     }
@@ -155,7 +184,7 @@ describe("capacity accounting", () => {
     // databaseSize 12288; body 4097 → old check saw 16385 ≤ 17000, but
     // the row's real page cost pushes the file to 20480 > 17000.
     const { store } = fixture(17_000);
-    expect(store.reserve(subject(), live())).toBe("bound");
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
     const over = store.submit(handle(), bytes(4097));
     expect(over).toEqual({ outcome: "transient", reason: "mailbox-full" });
     expect(store.claim([], 16)).toEqual([]);
@@ -167,7 +196,7 @@ describe("capacity accounting", () => {
   it("maps SQLITE_FULL to the stable transient mailbox-full and keeps stored packets", () => {
     const { sql, store } = fixture(1_000_000_000);
     sql.fullAt = 20_000; // simulated platform object ceiling
-    expect(store.reserve(subject(), live())).toBe("bound");
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
     expect(store.submit(handle(), bytes(4000))).toEqual({ outcome: "accepted" });
     const over = store.submit(handle(), bytes(4097));
     expect(over).toEqual({ outcome: "transient", reason: "mailbox-full" });
@@ -184,6 +213,64 @@ describe("capacity accounting", () => {
   });
 });
 
+describe("binding-scoped recipient operations", () => {
+  it("refuses native recipient operations on a listener-bound mailbox but keeps listener access", () => {
+    const { store } = fixture(1_000_000_000);
+    expect(store.reserve(subject(), live(), "listener")).toBe("bound");
+    expect(store.boundVia()).toBe("listener");
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+    // The admission credential alone is not the bound owner: native
+    // claim, settle and capacity answer as for an unbound mailbox.
+    expect(store.nativeClaim([], 16)).toBeNull();
+    expect(store.nativeSettle([1])).toBe(false);
+    expect(store.nativeCapacityInfo().bound).toBe(false);
+    // The binding transport's own proven session keeps full access.
+    const packets = store.claim([], 16)!;
+    expect(packets).toHaveLength(1);
+    expect(store.settle([packets[0]!.sequence])).toBe(true);
+    expect(store.claim([], 16)).toHaveLength(0);
+  });
+
+  it("admits native recipient operations on a natively bound mailbox", () => {
+    const { store } = fixture(1_000_000_000);
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+    store.submit(handle(), bytes(8));
+    expect(store.nativeClaim([], 16)).toHaveLength(1);
+    expect(store.nativeCapacityInfo().bound).toBe(true);
+  });
+
+  it("treats a bound mailbox with no binding record as unknown, never native", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // A mailbox bound before binding records existed: meta row only.
+    sql.tables.add("meta");
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    expect(store.boundVia()).toBeNull();
+    expect(store.nativeClaim([], 16)).toBeNull();
+  });
+});
+
+describe("sequence allocation", () => {
+  it("never reuses a settled sequence for a newer packet", () => {
+    const { store } = fixture(1_000_000_000);
+    store.reserve(subject(), live(), "native");
+    store.submit(handle(), bytes(8));
+    const first = store.claim([], 16)!;
+    expect(first).toHaveLength(1);
+    const seq = first[0]!.sequence;
+    expect(store.settle([seq])).toBe(true);
+    store.submit(handle(), bytes(9));
+    const second = store.claim([], 16)!;
+    expect(second).toHaveLength(1);
+    expect(second[0]!.sequence).toBeGreaterThan(seq);
+    // A delayed or retried settle of the dead sequence is vacuous: the
+    // newer packet stays claimable, and a stale in-flight exclusion of
+    // the dead sequence cannot suppress it.
+    expect(store.settle([seq])).toBe(true);
+    expect(store.claim([seq], 16)).toHaveLength(1);
+  });
+});
+
 describe("revocation", () => {
   it("revoke on a never-bound mailbox skips packet counting and persists the tombstone", async () => {
     const calls: Calls = [];
@@ -192,7 +279,7 @@ describe("revocation", () => {
     expect(sql.meta).toEqual({ subject: null, revoked: 1 });
     expect(store.revoked()).toBe(true);
     expect(store.canBind(live())).toBe("closed");
-    expect(store.reserve(subject(), live())).toBe("revoked");
+    expect(store.reserve(subject(), live(), "native")).toBe("revoked");
     // No packet table existed, so no revoke read was metered; the
     // tombstone alone counts as the written row.
     expect(calls).not.toContainEqual(["rowsRead", "revoke", 1]);
@@ -204,12 +291,12 @@ describe("store meter", () => {
   it("reports rows and stored bytes per operation without identifiers", () => {
     const calls: Calls = [];
     const { store } = fixture(1_000_000_000, calls);
-    expect(store.reserve(subject(), live())).toBe("bound");
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
     expect(store.submit(handle(), bytes(64))).toEqual({ outcome: "accepted" });
     const claimed = store.claim([], 16)!;
     expect(store.settle(claimed.map((p) => p.sequence))).toBe(true);
     const rowsWritten = calls.filter(([name]) => name === "rowsWritten");
-    expect(rowsWritten).toContainEqual(["rowsWritten", "reserve", 1]);
+    expect(rowsWritten).toContainEqual(["rowsWritten", "reserve", 2]);
     expect(rowsWritten).toContainEqual(["rowsWritten", "submit", 1]);
     expect(rowsWritten).toContainEqual(["rowsWritten", "settle", 1]);
     const rowsRead = calls.filter(([name]) => name === "rowsRead");

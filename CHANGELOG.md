@@ -41,3 +41,36 @@ before the first tagged release; no tag or published artifact is implied.
   bounded `operation`/`direction`/`plan` labels only.
 - `docs/ISSUANCE.md` — design for self-serve credential issuance
   alongside offline invitations; no issuance endpoint exists yet.
+
+### Fixed
+
+- Recipient operations are scoped to the binding transport: a mailbox
+  bound through a compatibility listener now answers 403 to native
+  claim, settle and capacity, so a copied `btm1` admission credential
+  can no longer read or delete a device-bound mailbox's packets. The
+  first binding records its transport in the new `binding` table;
+  mailboxes bound before this record exists answer as unknown, never
+  as native. Submit stays open cross-transport. No wire field, status
+  set or documented outcome changed, so the native contract stays
+  `1.0`; the refusal shape is the one unbound and revoked mailboxes
+  already answered.
+- The verified bind deadline now travels in the WebSocket attachment
+  and is enforced again at the durable first bind, so a challenged
+  socket can no longer complete a first HELLO after the invitation's
+  signed `notAfter`. An already-bound subject keeps facing only its
+  subject check.
+- Packet sequences are allocated from a durable, non-reusing `alloc`
+  row inside the packet transaction instead of the rowid default, so
+  a delayed or retried settle can never delete a newer packet under a
+  reused sequence and stale in-flight exclusions cannot suppress one.
+- `station.mjs` resolves a private output's physical ancestry through
+  symlinks (and the repository root itself) before permitting an
+  in-tree write, so `--dir`/`--out` can no longer place key material
+  in a tracked path or the Docker build context via a symlinked
+  ancestor.
+- `GET /v1/metrics` accepts a separate metrics-only credential
+  (`BADTOWER_METRICS_KEY`) alongside the station key, and
+  `station.mjs metrics` reads it from disk inside the process — the
+  credential no longer appears in a command line or process listing.
+  `init` mints `metrics.key`; `metrics-key` adds it to directories
+  initialized earlier.

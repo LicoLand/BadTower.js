@@ -39,4 +39,10 @@ export {
   MailboxStore,
   SUBJECT_BYTES,
 } from "./store";
-export type { Packet, ReserveResult, StoreMeter, SubmitResult } from "./store";
+export type {
+  BindingVia,
+  Packet,
+  ReserveResult,
+  StoreMeter,
+  SubmitResult,
+} from "./store";

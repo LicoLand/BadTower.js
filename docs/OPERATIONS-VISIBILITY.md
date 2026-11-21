@@ -49,7 +49,7 @@ is a per-mailbox record.
 | `badtower_ws_message_total` | counter | WebSocket request billing and load | `direction` (`in`, `out`), `kind` (frame kind) | None | 30 days raw, 13 months rollup |
 | `badtower_duration_ms` | histogram | Durable Object active duration and cost | none | None (aggregate only) | 30 days |
 | `badtower_sqlite_bytes` | gauge | Stored-data cost and capacity | `plan` (`free`, `paid`) | None | 30 days raw, 13 months rollup |
-| `badtower_rows_read_total` | counter | SQLite read cost | `operation` (`meta`, `reserve`, `submit`, `claim`, `settle`, `revoke`, `hasPending`) | None | 30 days raw, 13 months rollup |
+| `badtower_rows_read_total` | counter | SQLite read cost | `operation` (`meta`, `binding`, `alloc`, `reserve`, `submit`, `claim`, `settle`, `revoke`, `hasPending`) | None | 30 days raw, 13 months rollup |
 | `badtower_rows_written_total` | counter | SQLite write cost | `operation` | None | 30 days raw, 13 months rollup |
 | `badtower_wake_total` | counter | Offline-wake delivery health, if configured | `result` (`sent`, `failed`, `skipped`) | None | 30 days raw, 13 months rollup |
 | `badtower_abandoned_candidates` | gauge | Reclamation planning | `age_bucket` (whole months, coarse) | None (count only, never ids) | 13 months rollup |
@@ -141,7 +141,8 @@ documented purpose; it is not a standing table, dashboard, or export.
   `badtower_do_requests_total`, `badtower_do_active_ms_total`,
   `badtower_ws_messages_total`, `badtower_rows_read_total`,
   `badtower_rows_written_total`, `badtower_sqlite_bytes`) are exported
-  at `GET /v1/metrics` to the station key's holder as per-isolate
+  at `GET /v1/metrics` to the holder of the station key or the
+  metrics-only key as per-isolate
   aggregates; the rest of this catalogue, a metrics sink and the
   retention job are not built.
 - The `activity_bucket` field is not in the schema.

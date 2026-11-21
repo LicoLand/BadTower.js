@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -82,12 +82,35 @@ describe("station.mjs init", () => {
     await run(["init", "--dir", dir]);
     const key = fs.readFileSync(path.join(dir, "station.key"), "utf8").trim();
     expect(Buffer.from(key, "base64url")).toHaveLength(32);
+    const metricsKey = fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim();
+    expect(Buffer.from(metricsKey, "base64url")).toHaveLength(32);
     const vars = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
     expect(vars).toContain(`BADTOWER_STATION_KEY=${key}`);
+    expect(vars).toContain(`BADTOWER_METRICS_KEY=${metricsKey}`);
     expect((fs.statSync(path.join(dir, "station.key")).mode & 0o777)).toBe(0o600);
+    expect((fs.statSync(path.join(dir, "metrics.key")).mode & 0o777)).toBe(0o600);
     expect((fs.statSync(path.join(dir, ".dev.vars")).mode & 0o777)).toBe(0o600);
     expect((fs.statSync(dir).mode & 0o777)).toBe(0o700);
     await expectRefusal(["init", "--dir", dir], /station: .*already exists; refusing to overwrite/);
+  }, TEST_TIMEOUT);
+});
+
+describe("station.mjs metrics-key", () => {
+  it("adds the metrics credential to a directory initialized before it existed", async () => {
+    // Simulate a directory minted by an older init: station key only.
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    const metricsKey = fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim();
+    expect(Buffer.from(metricsKey, "base64url")).toHaveLength(32);
+    expect(metricsKey).not.toBe(key);
+    const vars = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
+    expect(vars).toContain(`BADTOWER_METRICS_KEY=${metricsKey}`);
+    expect((fs.statSync(path.join(dir, "metrics.key")).mode & 0o777)).toBe(0o600);
+    await expectRefusal(["metrics-key", "--dir", dir], /station: .*already exists; refusing to overwrite/);
   }, TEST_TIMEOUT);
 });
 
@@ -129,6 +152,24 @@ describe("station.mjs private output boundary", () => {
       /station: .*is inside the repository/,
     );
     expect(fs.existsSync(strayInvite)).toBe(false);
+  }, TEST_TIMEOUT);
+
+  it("refuses private outputs smuggled through a symlinked ancestor", async () => {
+    // data/evil → docs/: lexically inside the ignored root, physically
+    // a tracked repository path — the realpath ancestry check refuses.
+    const dataRoot = path.join(repo, "data");
+    const dataExisted = fs.existsSync(dataRoot);
+    fs.mkdirSync(dataRoot, { recursive: true });
+    const link = path.join(dataRoot, `evil-${process.pid}`);
+    fs.symlinkSync(path.join(repo, "docs"), link);
+    try {
+      const viaLink = path.join(link, "station");
+      await expectRefusal(["init", "--dir", viaLink], /station: .*is inside the repository/);
+      expect(fs.existsSync(path.join(repo, "docs", "station"))).toBe(false);
+    } finally {
+      fs.rmSync(link, { force: true });
+      if (!dataExisted) fs.rmdirSync(dataRoot);
+    }
   }, TEST_TIMEOUT);
 
   it("accepts private outputs under the ignored data/ root", async () => {
