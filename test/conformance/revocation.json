@@ -1,0 +1,122 @@
+{
+  "schema": "badtower-native-conformance/1",
+  "cases": [
+    {
+      "name": "revocation-is-idempotent-and-final",
+      "mailboxes": {
+        "SENDER": "18181818181818181818181818181818",
+        "M": "19191919191919191919191919191919"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "M",
+            "body": { "bytes": "9090909090909090909090909090909090909090909090909090909090909090" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "09090909090909090909090909090909", "packet": "aa55" } }
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/revoke",
+            "auth": "none",
+            "body": { "revoke": { "mailbox": "M" } }
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "M",
+            "body": { "bytes": "9090909090909090909090909090909090909090909090909090909090909090" }
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/native/capacity",
+            "mailbox": "M"
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a", "packet": "cc" } }
+          },
+          "expect": {
+            "status": 200,
+            "body": { "submitResult": { "outcome": "rejected", "reason": "target-unavailable" } }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/revoke",
+            "auth": "none",
+            "body": { "revoke": { "mailbox": "M" } }
+          },
+          "expect": { "status": 204 }
+        }
+      ]
+    },
+    {
+      "name": "forged-or-mis-sized-revocation-is-refused",
+      "mailboxes": { "M": "20202020202020202020202020202020" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/revoke",
+            "auth": "none",
+            "body": { "revoke": { "mailbox": "M", "forged": true } }
+          },
+          "expect": { "status": 401 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/revoke",
+            "auth": "none",
+            "body": { "bytes": "0b0b0b0b" }
+          },
+          "expect": { "status": 401 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/revoke",
+            "auth": "none",
+            "contentType": "text/plain",
+            "body": { "revoke": { "mailbox": "M" } }
+          },
+          "expect": { "status": 400 }
+        }
+      ]
+    }
+  ]
+}

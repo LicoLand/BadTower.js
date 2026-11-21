@@ -136,9 +136,14 @@ documented purpose; it is not a standing table, dashboard, or export.
 
 ## What is not built
 
-- `wrangler.jsonc` still disables observability and logs. Enabling the
-  aggregate export requires a metrics sink and a bounded-cardinality
-  exporter.
+- `wrangler.jsonc` still disables observability and logs. The
+  cost-dimension meters (`badtower_worker_requests_total`,
+  `badtower_do_requests_total`, `badtower_do_active_ms_total`,
+  `badtower_ws_messages_total`, `badtower_rows_read_total`,
+  `badtower_rows_written_total`, `badtower_sqlite_bytes`) are exported
+  at `GET /v1/metrics` to the station key's holder as per-isolate
+  aggregates; the rest of this catalogue, a metrics sink and the
+  retention job are not built.
 - The `activity_bucket` field is not in the schema.
 - There is no dashboard, alert rule, or retention job.
 - There is no per-mailbox inventory endpoint, and this design does not

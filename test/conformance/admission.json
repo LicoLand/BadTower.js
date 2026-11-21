@@ -1,0 +1,78 @@
+{
+  "schema": "badtower-native-conformance/1",
+  "cases": [
+    {
+      "name": "healthz-is-unauthenticated-liveness",
+      "steps": [
+        {
+          "request": { "method": "GET", "path": "/healthz", "auth": "none" },
+          "expect": { "status": 200, "body": { "text": "ok\n" } }
+        }
+      ]
+    },
+    {
+      "name": "plaintext-transport-refused",
+      "assumes": { "plaintextAllowed": false },
+      "steps": [
+        {
+          "request": { "method": "GET", "path": "/healthz", "auth": "none", "scheme": "http" },
+          "expect": { "status": 403 }
+        }
+      ]
+    },
+    {
+      "name": "version-requires-admission-not-binding",
+      "mailboxes": { "A": "11111111111111111111111111111111" },
+      "steps": [
+        {
+          "request": { "method": "GET", "path": "/v1/native/version", "auth": "none" },
+          "expect": { "status": 401 }
+        },
+        {
+          "request": { "method": "GET", "path": "/v1/native/version", "mailbox": "A" },
+          "expect": {
+            "status": 200,
+            "body": { "version": { "major": 1, "minor": 0, "revision": 0, "reserved": 0 } }
+          }
+        }
+      ]
+    },
+    {
+      "name": "forged-and-missing-credentials-refused",
+      "mailboxes": { "A": "22222222222222222222222222222222" },
+      "steps": [
+        {
+          "request": { "method": "GET", "path": "/v1/native/capacity", "mailbox": "A", "auth": "forged" },
+          "expect": { "status": 401 }
+        },
+        {
+          "request": { "method": "GET", "path": "/v1/native/capacity", "auth": "none" },
+          "expect": { "status": 401 }
+        },
+        {
+          "request": { "method": "GET", "path": "/v1/native/capacity", "mailbox": "A" },
+          "expect": { "status": 403 }
+        }
+      ]
+    },
+    {
+      "name": "unknown-paths-answer-404",
+      "mailboxes": { "A": "33333333333333333333333333333333" },
+      "steps": [
+        {
+          "request": { "method": "GET", "path": "/", "auth": "none" },
+          "expect": { "status": 404 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/nope",
+            "mailbox": "A",
+            "body": { "bytes": "" }
+          },
+          "expect": { "status": 404 }
+        }
+      ]
+    }
+  ]
+}

@@ -1,2 +1,6 @@
 # Station HMAC key — 32 random bytes, base64url (npm run station -- init --dir <dir> generates one)
 BADTOWER_STATION_KEY=
+# Cloudflare plan: "free" or "paid" — sets the platform limits the station validates against
+BADTOWER_PLAN=free
+# Per-mailbox storage cap in bytes; must not exceed the plan's per-object limit (1 GB free, 10 GB paid)
+BADTOWER_MAILBOX_CAPACITY_BYTES=1000000000

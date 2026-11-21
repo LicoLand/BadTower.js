@@ -9,6 +9,7 @@
   "observability": { "enabled": false, "logs": { "enabled": false } },
   "secrets": { "required": ["BADTOWER_STATION_KEY"] },
   "vars": {
+    "BADTOWER_PLAN": "free",
     "BADTOWER_MAILBOX_CAPACITY_BYTES": "1000000000",
     "BADTOWER_ALLOW_PLAINTEXT": "false"
   },

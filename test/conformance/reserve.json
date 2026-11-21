@@ -1,0 +1,115 @@
+{
+  "schema": "badtower-native-conformance/1",
+  "cases": [
+    {
+      "name": "one-subject-binds-idempotently-a-different-one-is-refused",
+      "mailboxes": { "A": "44444444444444444444444444444444" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+          },
+          "expect": { "status": 409 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+          },
+          "expect": { "status": 200 }
+        }
+      ]
+    },
+    {
+      "name": "expired-first-bind-is-refused-then-a-live-one-binds",
+      "mailboxes": { "A": "55555555555555555555555555555555" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "bindDeadline": "past",
+            "body": { "bytes": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+          },
+          "expect": { "status": 200 }
+        }
+      ]
+    },
+    {
+      "name": "malformed-subject-sizes-and-wrong-content-type-are-400",
+      "mailboxes": { "A": "66666666666666666666666666666666" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "fill": { "byte": "aa", "length": 31 } }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "fill": { "byte": "aa", "length": 33 } }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "contentType": "text/plain",
+            "body": { "bytes": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }
+          },
+          "expect": { "status": 200 }
+        }
+      ]
+    }
+  ]
+}

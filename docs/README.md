@@ -7,6 +7,7 @@
 - [`NATIVE-CONTRACT.md`](NATIVE-CONTRACT.md) — native contract version `1.0`, its queryable location and change rules
 - [`VERSIONING.md`](VERSIONING.md) — the single package version source and the bump procedure
 - [`OPERATIONS.md`](OPERATIONS.md) — operator setup, invitations, revocation, TLS, deploy, and container procedures
+- [`ISSUANCE.md`](ISSUANCE.md) — design: self-serve credential issuance, its rate-limit basis and abuse responses
 - [`ABUSE-CAPACITY.md`](ABUSE-CAPACITY.md) — abuse threats, capacity formulas and Cloudflare cost impact
 - [`OPERATIONS-VISIBILITY.md`](OPERATIONS-VISIBILITY.md) — aggregate metrics, retention and abandoned-mailbox identification
 - [`COST.md`](COST.md) — Cloudflare billing inputs, formulas and the three operating shapes
@@ -16,3 +17,4 @@
 - [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — request path, state ownership, and capacity model
 - [`../SECURITY.md`](../SECURITY.md) — credential, privacy, and threat boundaries
 - [`../CHANGELOG.md`](../CHANGELOG.md) — recorded changes; the root `package.json` is the version source
+- [`../test/conformance/`](../test/conformance/README.md) — implementation-neutral native-contract conformance cases shared with other implementations

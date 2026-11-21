@@ -52,8 +52,17 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   drained.
 - Submit targets any mailbox id (the first 16 handle bytes); the store
   rejects unbound/revoked mailboxes and answers transient mailboxFull
-  when the object would exceed `BADTOWER_MAILBOX_CAPACITY_BYTES`
-  (reads `ctx.storage.sql.databaseSize`).
+  when the measured `ctx.storage.sql.databaseSize` after the insert
+  would exceed `BADTOWER_MAILBOX_CAPACITY_BYTES` — the insert runs in a
+  transaction so row overhead and page growth are judged on real bytes,
+  and a platform `SQLITE_FULL` maps to the same transient answer.
+- `BADTOWER_PLAN` (`free`/`paid`, default `free`) selects the platform
+  limit set validated at startup (per-object 1 GB / 10 GB); a mailbox
+  capacity above the plan's per-object limit refuses to run.
+- Every Worker request and mailbox operation feeds the aggregate cost
+  meters exported to the operator at `GET /v1/metrics` (station-key
+  bearer): request, duration, row and storage aggregates by `operation`
+  and `plan` only — never a mailbox id, handle, subject or content.
 - The LicoArc listener admits one live connection per mailbox: a new
   READY supersedes older ready sockets (4000). Revocation deletes
   everything and closes sockets (4001).

@@ -70,11 +70,41 @@ only: no source tree, no registry access. Re-deploys keep the
 `badtower-state` volume; a later manual `docker compose up` keeps the
 `--listen` binding because it lives in the remote `.env`.
 
+## Plan and capacity configuration
+
+| Variable | Meaning |
+| --- | --- |
+| `BADTOWER_PLAN` | `free` or `paid` (default `free`). Selects the platform limit set validated at startup — per-object storage 1 GB free / 10 GB paid, plus the request, duration and row ceilings listed in `COST.md`. |
+| `BADTOWER_MAILBOX_CAPACITY_BYTES` | Per-mailbox storage cap (default `1000000000`). The station refuses to run when it exceeds the plan's per-object limit. The submit path additionally measures the real post-insert database size and maps `SQLITE_FULL` to the contract's transient `mailbox-full`. |
+
+Both live in `apps/station/wrangler.jsonc` `vars` (and `.dev.vars` for
+`wrangler dev`). The values trace to the official inputs table in
+`COST.md`; change the plan there first when Cloudflare moves a limit.
+
 ## Health
 
 ```sh
 npm run station -- health --station https://station.example [--ca PEM]
 ```
+
+## Aggregate metrics
+
+`GET /v1/metrics` returns the aggregate cost meters
+(`badtower_worker_requests_total`, `badtower_do_requests_total`,
+`badtower_do_active_ms_total`, `badtower_ws_messages_total`,
+`badtower_rows_read_total`, `badtower_rows_written_total`,
+`badtower_sqlite_bytes`) labelled only by closed `operation`,
+`direction` and `plan` sets, in Prometheus text exposition. It is
+operator-only:
+
+```sh
+curl -H "Authorization: Bearer $(cat <dir>/station.key)" \
+  --cacert <dir>/tls/ca.crt https://station.example/v1/metrics
+```
+
+Values are per-isolate aggregates for reconciliation against
+Cloudflare's own usage record, which remains authoritative (see
+`COST.md` and `OPERATIONS-VISIBILITY.md`).
 
 ## Local development
 

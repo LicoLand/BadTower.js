@@ -33,6 +33,18 @@ export type SubmitResult =
 
 export type Packet = { sequence: number; handle: Uint8Array; body: Uint8Array };
 
+/**
+ * Optional aggregate accounting hook for the rows and stored bytes a
+ * store operation touches. Counts feed the cost meters in
+ * docs/COST.md; they never carry mailbox ids, handles or content.
+ */
+export type StoreMeter = {
+  rowsRead(operation: string, count: number): void;
+  rowsWritten(operation: string, count: number): void;
+  /** The mailbox's current databaseSize after an operation, for the storage gauge. */
+  observeStorage(bytes: number): void;
+};
+
 type Meta = { subject: Uint8Array | null; revoked: boolean };
 
 /** A subarray's .buffer is its parent's — storing it would leak the whole message. */
@@ -40,13 +52,32 @@ function owned(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
+/**
+ * Whether a storage error is the platform's storage-full condition.
+ * workerd reports it as an Error whose message names SQLITE_FULL; the
+ * check is deliberately loose so a wording change still fails closed.
+ */
+/** Marker for the measured-capacity rollback inside submit's transaction. */
+class CapacityExceeded extends Error {}
+
+export function isStorageFull(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /SQLITE_FULL|database or disk is full|storage.*(is )?full/i.test(error.message)
+  );
+}
+
 export class MailboxStore {
   private meta: Meta | null = null;
 
   constructor(
     private readonly ctx: DurableObjectState,
-    private readonly options: { capacityBytes(): number },
+    private readonly options: { capacityBytes(): number; meter?: StoreMeter | undefined },
   ) {}
+
+  private meter(): StoreMeter | undefined {
+    return this.options.meter;
+  }
 
   /** Schema exists only where a mailbox exists: a never-bound object writes nothing. */
   private createSchema(): void {
@@ -68,6 +99,7 @@ export class MailboxStore {
     } catch {
       // No meta table is an unbound mailbox, not an error.
     }
+    this.meter()?.rowsRead("meta", rows.length);
     const row = rows[0] as { subject: unknown; revoked: unknown } | undefined;
     this.meta = row === undefined
       ? { subject: null, revoked: false }
@@ -122,7 +154,9 @@ export class MailboxStore {
         "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
         owned(subject),
       );
+      this.meter()?.rowsWritten("reserve", 1);
       this.meta = { subject: subject.slice(), revoked: false };
+      this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
       return "bound";
     }
     if (
@@ -137,21 +171,39 @@ export class MailboxStore {
     return "bound";
   }
 
-  /** Store one packet in this mailbox. The handle rides opaquely. */
+  /**
+   * Store one packet in this mailbox. The handle rides opaquely.
+   *
+   * Capacity is judged on the measured database size after the insert,
+   * inside a transaction: the packet row's cell overhead and SQLite
+   * page growth are real bytes on disk, and an optimistic
+   * `body.length` estimate under-counts both. A projected overflow
+   * rolls the insert back and answers transient `mailbox-full`; a
+   * platform `SQLITE_FULL` — reached when capacity was configured at
+   * or beyond the plan's per-object limit — maps to the same stable
+   * transient answer. Already stored packets are never touched by
+   * either path.
+   */
   submit(handle: Uint8Array, body: Uint8Array): SubmitResult {
     const meta = this.loadMeta();
     if (meta.subject === null || meta.revoked) {
       return { outcome: "rejected", reason: "target-unavailable" };
     }
-    if (this.ctx.storage.sql.databaseSize + body.length > this.capacityBytes()) {
-      return { outcome: "transient", reason: "mailbox-full" };
+    const sql = this.ctx.storage.sql;
+    try {
+      return this.ctx.storage.transactionSync(() => {
+        sql.exec("INSERT INTO packet(handle, body) VALUES(?, ?)", owned(handle), owned(body));
+        if (sql.databaseSize > this.capacityBytes()) throw new CapacityExceeded();
+        this.meter()?.rowsWritten("submit", 1);
+        this.meter()?.observeStorage(sql.databaseSize);
+        return { outcome: "accepted" };
+      });
+    } catch (error) {
+      if (error instanceof CapacityExceeded || isStorageFull(error)) {
+        return { outcome: "transient", reason: "mailbox-full" };
+      }
+      throw error;
     }
-    this.ctx.storage.sql.exec(
-      "INSERT INTO packet(handle, body) VALUES(?, ?)",
-      owned(handle),
-      owned(body),
-    );
-    return { outcome: "accepted" };
   }
 
   /**
@@ -174,6 +226,7 @@ export class MailboxStore {
             limit,
           )
           .toArray();
+    this.meter()?.rowsRead("claim", rows.length);
     return (rows as Array<{ seq: number; handle: unknown; body: unknown }>).map((row) => ({
       sequence: row.seq,
       handle: fromSqliteBlob(row.handle),
@@ -191,24 +244,37 @@ export class MailboxStore {
     for (const sequence of sequences) {
       this.ctx.storage.sql.exec("DELETE FROM packet WHERE seq = ?", sequence);
     }
+    this.meter()?.rowsWritten("settle", sequences.length);
+    this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
     return true;
   }
 
   hasPending(): boolean {
     const meta = this.loadMeta();
     if (meta.subject === null || meta.revoked) return false;
-    return (
-      this.ctx.storage.sql.exec("SELECT seq FROM packet LIMIT 1").toArray().length > 0
-    );
+    const rows = this.ctx.storage.sql.exec("SELECT seq FROM packet LIMIT 1").toArray();
+    this.meter()?.rowsRead("hasPending", rows.length);
+    return rows.length > 0;
   }
 
   /** Destroy the mailbox and refuse it forever. */
   async revoke(): Promise<void> {
+    // Cloudflare counts deleteAll()'s removed rows as rows written;
+    // COUNT(*) first keeps the aggregate honest. The extra read is once
+    // per mailbox lifetime and cheaper than guessing.
+    const remaining = Number(
+      (this.ctx.storage.sql
+        .exec("SELECT COUNT(*) AS n FROM packet")
+        .toArray()[0] as { n: unknown } | undefined)?.n ?? 0,
+    );
+    this.meter()?.rowsRead("revoke", 1);
+    this.meter()?.rowsWritten("revoke", remaining + 1);
     await this.ctx.storage.deleteAll();
     // deleteAll drops the tables too; the tombstone needs meta back.
     this.createSchema();
     this.ctx.storage.sql.exec("INSERT INTO meta(id, subject, revoked) VALUES(0, NULL, 1)");
     this.meta = { subject: null, revoked: true };
+    this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
   }
 
   capacityBytes(): number {

@@ -30,16 +30,24 @@ function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
 
 export class StationCredentials {
   private imported: Promise<CryptoKey> | null = null;
+  private rawKey: Uint8Array | null = null;
 
   constructor(private readonly encodedKey: string) {}
 
-  private key(): Promise<CryptoKey> {
-    this.imported ??= (async () => {
+  private raw(): Uint8Array {
+    if (this.rawKey === null) {
       const raw = decodeBase64Url(this.encodedKey);
       if (raw === null || raw.length !== 32) throw new Error("invalid station key");
+      this.rawKey = raw;
+    }
+    return this.rawKey;
+  }
+
+  private key(): Promise<CryptoKey> {
+    this.imported ??= (async () => {
       return crypto.subtle.importKey(
         "raw",
-        raw as BufferSource,
+        this.raw() as BufferSource,
         { name: "HMAC", hash: "SHA-256" },
         false,
         ["sign", "verify"],
@@ -78,6 +86,20 @@ export class StationCredentials {
     ]);
     if (!equalBytes(expected, raw.slice(24))) return { kind: "bad" };
     return { kind: "ok", mailboxId, notAfter: Number(notAfter) };
+  }
+
+  /**
+   * Verify the operator credential that guards the aggregate-metrics
+   * route: `Authorization: Bearer <station key>` in the same base64url
+   * encoding `station.mjs init` writes, compared in constant time. The
+   * station key is the operator's own secret; this surface exists only
+   * for whoever already holds it.
+   */
+  verifyOperator(header: string | null): boolean {
+    const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const raw = decodeBase64Url(token);
+    if (raw === null) return false;
+    return equalBytes(raw, this.raw());
   }
 
   /**

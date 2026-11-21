@@ -43,31 +43,50 @@ Implemented in this repository:
 - `scripts/interop.mjs` — local two-endpoint interop harness.
 - Native contract version `1.0`, served at `GET /v1/native/version` and
   documented in `API.md` and `NATIVE-CONTRACT.md`.
+- Implementation-neutral native-contract conformance cases
+  (`test/conformance/*.json`, format in `test/conformance/README.md`)
+  driven against the core harness; the same data files are the
+  conformance source for other implementations.
+- Plan-aware limits: `BADTOWER_PLAN` selects the explicit Free/Paid
+  platform ceilings; mailbox capacity above the plan's per-object
+  limit refuses to run.
+- Measured capacity accounting: submit judges the post-insert
+  `databaseSize` inside a transaction (row overhead and page growth
+  counted), and `SQLITE_FULL` maps to the transient `mailbox-full`.
+- Aggregate cost meters at `GET /v1/metrics` (station-key bearer):
+  Worker/DO requests, DO active duration, SQLite rows read/written and
+  stored bytes, labelled only by `operation`/`direction`/`plan`.
 - Design documents: `PLUGIN-A2A.md`, `PLUGIN-MCP.md`,
   `ABUSE-CAPACITY.md`, `OPERATIONS-VISIBILITY.md`, `COST.md`,
-  `OFFLINE-WAKE.md`.
+  `OFFLINE-WAKE.md`, `ISSUANCE.md`.
 
 Not implemented (do not infer from a design document):
 
 - A2A compatibility plugin, MCP compatibility plugin, or any listener
   beyond `licoarc.mailbox.v1`.
-- Offline wake hook, per-credential/per-target ingress budgets, global
-  storage budget, aggregate metrics exporter, abandoned-mailbox sweep.
+- Self-serve issuance (`ISSUANCE.md` is the design), offline wake hook,
+  per-credential/per-target ingress budgets, global storage budget,
+  the wider operations metric catalogue and abandoned-mailbox sweep.
 - Cluster, replication, failover, backup/restore, or plugin host.
 - Any A2A or MCP conformance claim. Both plugin documents are pins and
   support scopes, not implementations.
 
 ## 3. 验证 (Verification)
 
-Verified in this working tree on 2026-11-16:
+Verified in this working tree on 2026-11-21:
 
 | Check | Command | Result |
 | --- | --- | --- |
 | Version source | `npm run check:version` | pass: `0.0.0-preview.0` consistent across root manifest, 3 workspace manifests, lockfile and CHANGELOG |
 | TypeScript | `npm run typecheck` | pass (source and test projects) |
-| Native contract | `npm run test:core` | pass: 13 tests, including the contract version body and admission refusal |
+| Native contract | `npm run test:core` | pass: native suite plus the 16 data-file conformance cases from `test/conformance/` |
+| Full repository check | `npm run check` | pass: version, typecheck, script syntax, generated types, all tests, wrangler dry-run |
+
+Earlier on 2026-11-16:
+
+| Check | Command | Result |
+| --- | --- | --- |
 | Two-endpoint interop | `node scripts/interop.mjs` with published `licoarc-client 0.2.0` | pass: two enrollments/handshakes, A→B 96-byte offline delivery, B→A 64-byte offline delivery, both byte-equal, redrain returned 0 |
-| Full repository check | `npm run check` | pass: version, typecheck, script syntax, generated types, 45 tests across 5 files, wrangler dry-run |
 
 The interop run used the crates.io release `licoarc-client 0.2.0`
 (`cargo install licoarc-client --version 0.2.0 --locked`), a locally
@@ -127,17 +146,19 @@ privacy properties, or any cluster behavior.
   self-hosted Docker (`station docker-deploy`), and local TLS
   (`wrangler dev --local` with a private CA). See `OPERATIONS.md`.
 - `wrangler.jsonc` still sets `observability.enabled: false` and
-  `logs.enabled: false`. There is no per-mailbox inventory, no aggregate
-  metrics exporter, and no abandoned-mailbox sweep. The design is in
-  `OPERATIONS-VISIBILITY.md`; it is not deployed.
+  `logs.enabled: false`. There is no per-mailbox inventory and no
+  abandoned-mailbox sweep. The cost-dimension meters are exported at
+  `GET /v1/metrics` for the station key's holder; the rest of the
+  catalogue in `OPERATIONS-VISIBILITY.md` is not built.
 - Cost: the official inputs and formulas are in `COST.md`, read from
   Cloudflare documentation on 2026-11-16. No invoice, spend forecast, or
-  free-tier guarantee is claimed. The cost-related implementation gaps
-  are registered as Kanban tasks.
-- Abuse: per-mailbox capacity, the 16-packet in-flight window, one live
-  socket and admission are implemented. Per-credential/per-target
-  budgets, a global storage budget, and plan-aware capacity accounting
-  are not. See `ABUSE-CAPACITY.md`.
+  free-tier guarantee is claimed. Plan-aware limits, measured capacity
+  accounting and the cost meters are implemented; the global storage
+  budget remains a Kanban task.
+- Abuse: per-mailbox capacity (now measured post-insert), the 16-packet
+  in-flight window, one live socket and admission are implemented.
+  Per-credential/per-target budgets and the global storage budget are
+  not. See `ABUSE-CAPACITY.md`.
 - Offline wake: not configured, not implemented, and absent by default.
   When unconfigured, Station behavior is unchanged by design; see
   `OFFLINE-WAKE.md`.

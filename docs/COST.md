@@ -254,19 +254,28 @@ plan; they are examples of applying the formulas, not limits.
 
 ## What the implementation must change
 
-These are registered as Kanban tasks (the global-budget item is the
-existing abuse/capacity implementation task, not a duplicate):
+Status after the 2026-11-21 batch — items 1, 2 and 4 are implemented;
+the global storage budget remains registered work:
 
-1. **Capacity accounting:** include row/page overhead, reserve headroom,
-   respect the 1 GB/10 GB per-object limit, and map `SQLITE_FULL` to a
-   stable fail-closed response.
-2. **Cost meters:** export aggregate request, duration, row and storage
-   counters with bounded labels so the formulas above can be checked
-   against real usage.
+1. **Capacity accounting:** done. Submit inserts inside a transaction
+   and judges the measured post-insert `databaseSize` (row overhead and
+   page growth are real bytes); `SQLITE_FULL` maps to the transient
+   `mailbox-full`.
+2. **Cost meters:** done for the cost dimensions. `GET /v1/metrics`
+   exports `badtower_worker_requests_total` (R_w),
+   `badtower_do_requests_total` (R_do), `badtower_do_active_ms_total`
+   (T_active), `badtower_ws_messages_total{direction="in"}` (Ws_in),
+   `badtower_rows_read_total`/`badtower_rows_written_total` (Rows_r,
+   Rows_w) and `badtower_sqlite_bytes` (S), labelled only by `operation`,
+   `direction` and `plan` — each formula above is recomputable from the
+   exported aggregates, modulo the per-isolate caveat noted at the
+   route.
 3. **Global storage budget:** enforce a configured budget that keeps
    claim, settle and revoke available under pressure.
-4. **Plan-aware limits:** make the free/paid storage and request ceilings
-   explicit configuration rather than an implicit platform surprise.
+4. **Plan-aware limits:** done. `BADTOWER_PLAN` selects the explicit
+   Free/Paid ceilings in `PLANS` (the constants mirror this document's
+   inputs table); a mailbox capacity above the plan's per-object limit
+   refuses to run.
 
 ## Non-goals
 

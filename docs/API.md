@@ -55,6 +55,11 @@ major, minor and revision changes are normative in
 - `POST /v1/revoke` — body: mailboxId(16) ‖ HMAC(stationKey, "btr1" ‖
   mailboxId). Idempotent 204: the mailbox's packets are gone and the
   mailbox can never bind again.
+- `GET /v1/metrics` — operator-only aggregate cost meters in
+  Prometheus text exposition. `Authorization: Bearer <station key>`
+  (the same base64url key `station.mjs init` writes), 401 otherwise.
+  Series are labelled only by the closed `operation`, `direction` and
+  `plan` sets — no mailbox id, handle, subject, IP, path or content.
 - `GET /healthz` — unauthenticated liveness.
 
 Claimed-but-unsettled packets replay on the next claim — delivery is

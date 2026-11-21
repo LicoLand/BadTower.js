@@ -29,3 +29,15 @@ before the first tagged release; no tag or published artifact is implied.
   visibility and offline-wake design documents.
 - Pinned A2A and MCP plugin Lines, bindings, consistency sources and
   support scopes; no plugin implementation or conformance claim.
+- Implementation-neutral native-contract conformance cases under
+  `test/conformance/`, consumed by the core test suite and sharable
+  with other implementations.
+- Plan-aware platform limits (`BADTOWER_PLAN`, validated at startup
+  against explicit Free/Paid ceilings) and measured capacity
+  accounting: submit judges the post-insert `databaseSize` in a
+  transaction and maps `SQLITE_FULL` to the transient `mailbox-full`.
+- Operator aggregate cost meters at `GET /v1/metrics`: Worker/DO
+  requests, DO active duration, SQLite rows and stored bytes with
+  bounded `operation`/`direction`/`plan` labels only.
+- `docs/ISSUANCE.md` — design for self-serve credential issuance
+  alongside offline invitations; no issuance endpoint exists yet.

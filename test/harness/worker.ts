@@ -13,6 +13,7 @@ import {
   emptyNoStore,
   handleNativeRequest,
   readBoundedBody,
+  resolvePlan,
   secureResponse,
   toHex,
   type Packet,
@@ -24,14 +25,19 @@ export type HarnessEnv = {
   BADTOWER_STATION_KEY: string;
   BADTOWER_MAILBOX_CAPACITY_BYTES: string;
   BADTOWER_ALLOW_PLAINTEXT: string;
+  BADTOWER_PLAN?: string;
   MAILBOX: DurableObjectNamespace<CoreMailbox>;
 };
 
 export class CoreMailbox extends DurableObject<HarnessEnv> {
   private readonly store = new MailboxStore(this.ctx, {
-    capacityBytes: () =>
-      Number(this.env.BADTOWER_MAILBOX_CAPACITY_BYTES ?? "1000000000"),
+    capacityBytes: () => resolvePlan(this.env).mailboxCapacityBytes,
   });
+
+  constructor(ctx: DurableObjectState, env: HarnessEnv) {
+    super(ctx, env);
+    resolvePlan(env); // refuse an unsafe plan/capacity pair at startup
+  }
 
   async submit(handle: Uint8Array, body: Uint8Array): Promise<SubmitResult> {
     return this.store.submit(handle, body);
@@ -72,6 +78,14 @@ function admission(env: HarnessEnv): StationCredentials {
 export default {
   async fetch(request: Request, env: HarnessEnv): Promise<Response> {
     const url = new URL(request.url);
+    try {
+      resolvePlan(env);
+    } catch {
+      return secureResponse("station misconfigured\n", {
+        status: 500,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
     const allowPlaintext = String(env.BADTOWER_ALLOW_PLAINTEXT);
     if (url.protocol !== "https:" && allowPlaintext !== "true") {
       return emptyNoStore(403);

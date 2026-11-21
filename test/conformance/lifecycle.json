@@ -1,0 +1,359 @@
+{
+  "schema": "badtower-native-conformance/1",
+  "cases": [
+    {
+      "name": "submit-to-unbound-mailbox-is-rejected-not-transient",
+      "mailboxes": {
+        "SENDER": "77777777777777777777777777777777",
+        "GHOST": "88888888888888888888888888888888"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": {
+              "submit": { "mailbox": "GHOST", "tag": "01010101010101010101010101010101", "packet": "deadbeef" }
+            }
+          },
+          "expect": {
+            "status": 200,
+            "body": { "submitResult": { "outcome": "rejected", "reason": "target-unavailable" } }
+          }
+        }
+      ]
+    },
+    {
+      "name": "stored-packets-claim-in-order-replay-and-settle",
+      "mailboxes": {
+        "SENDER": "99999999999999999999999999999999",
+        "M": "10101010101010101010101010101010"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "M",
+            "body": { "bytes": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "02020202020202020202020202020202", "packet": "a1" } }
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "03030303030303030303030303030303", "packet": "b2b2" } }
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "04040404040404040404040404040404", "packet": "c3c3c3" } }
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": {
+            "status": 200,
+            "body": {
+              "claim": {
+                "saveAs": "first",
+                "packets": [
+                  { "handle": "1010101010101010101010101010101002020202020202020202020202020202", "body": "a1" },
+                  { "handle": "1010101010101010101010101010101003030303030303030303030303030303", "body": "b2b2" },
+                  { "handle": "1010101010101010101010101010101004040404040404040404040404040404", "body": "c3c3c3" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": {
+            "status": 200,
+            "body": {
+              "claim": {
+                "packets": [
+                  { "handle": "1010101010101010101010101010101002020202020202020202020202020202", "body": "a1" },
+                  { "handle": "1010101010101010101010101010101003030303030303030303030303030303", "body": "b2b2" },
+                  { "handle": "1010101010101010101010101010101004040404040404040404040404040404", "body": "c3c3c3" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16, "exclude": "first" } }
+          },
+          "expect": { "status": 200, "body": { "claim": { "packets": [] } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/settle",
+            "mailbox": "M",
+            "body": { "settle": { "sequences": "first", "pick": [0, 2] } }
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": {
+            "status": 200,
+            "body": {
+              "claim": {
+                "saveAs": "rest",
+                "packets": [
+                  { "handle": "1010101010101010101010101010101003030303030303030303030303030303", "body": "b2b2" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/settle",
+            "mailbox": "M",
+            "body": { "settle": { "sequences": "rest" } }
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": { "status": 200, "body": { "claim": { "packets": [] } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/settle",
+            "mailbox": "M",
+            "body": { "settle": { "sequences": { "literal": [99] } } }
+          },
+          "expect": { "status": 204 }
+        }
+      ]
+    },
+    {
+      "name": "claim-and-settle-refuse-an-unbound-mailbox",
+      "mailboxes": { "A": "12121212121212121212121212121212" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "A",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/settle",
+            "mailbox": "A",
+            "body": { "settle": { "sequences": { "literal": [1] } } }
+          },
+          "expect": { "status": 403 }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/native/capacity",
+            "mailbox": "A"
+          },
+          "expect": { "status": 403 }
+        }
+      ]
+    },
+    {
+      "name": "capacity-reports-configured-capacity-and-measured-database",
+      "mailboxes": { "A": "13131313131313131313131313131313" },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "A",
+            "body": { "bytes": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "path": "/v1/native/capacity",
+            "mailbox": "A"
+          },
+          "expect": {
+            "status": 200,
+            "body": { "capacity": { "capacityBytes": "configured", "databaseBytes": "positive" } }
+          }
+        }
+      ]
+    },
+    {
+      "name": "claim-limit-caps-at-the-in-flight-window-and-malformed-bodies-are-400",
+      "mailboxes": {
+        "SENDER": "14141414141414141414141414141414",
+        "M": "15151515151515151515151515151515"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "M",
+            "body": { "bytes": "abababababababababababababababababababababababababababababababab" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "05050505050505050505050505050505", "packetFill": { "byte": "e1", "length": 4 } } },
+            "repeat": 18
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 16 } }
+          },
+          "expect": { "status": 200, "body": { "claim": { "count": 16 } } }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "claim": { "limit": 17 } }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "body": { "bytes": "10" }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/claim",
+            "mailbox": "M",
+            "contentType": "text/plain",
+            "body": { "claim": { "limit": 1 } }
+          },
+          "expect": { "status": 400 }
+        }
+      ]
+    },
+    {
+      "name": "submit-body-shape-and-packet-size-limits-are-enforced",
+      "mailboxes": {
+        "SENDER": "16161616161616161616161616161616",
+        "M": "17171717171717171717171717171717"
+      },
+      "steps": [
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/reserve",
+            "mailbox": "M",
+            "body": { "bytes": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd" }
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "submit": { "mailbox": "M", "tag": "06060606060606060606060606060606", "packet": "" } }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": { "bytes": "0707" }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": {
+              "submit": { "mailbox": "M", "tag": "07070707070707070707070707070707", "packetFill": { "byte": "ff", "length": 524289 } }
+            }
+          },
+          "expect": { "status": 400 }
+        },
+        {
+          "request": {
+            "method": "POST",
+            "path": "/v1/native/submit",
+            "mailbox": "SENDER",
+            "body": {
+              "submit": { "mailbox": "M", "tag": "08080808080808080808080808080808", "packetFill": { "byte": "ee", "length": 524288 } }
+            }
+          },
+          "expect": { "status": 200, "body": { "submitResult": { "outcome": "accepted", "reason": "none" } } }
+        }
+      ]
+    }
+  ]
+}
