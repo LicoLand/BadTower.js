@@ -49,7 +49,7 @@ is a per-mailbox record.
 | `badtower_ws_message_total` | counter | WebSocket request billing and load | `direction` (`in`, `out`), `kind` (frame kind) | None | 30 days raw, 13 months rollup |
 | `badtower_duration_ms` | histogram | Durable Object active duration and cost | none | None (aggregate only) | 30 days |
 | `badtower_sqlite_bytes` | gauge | Stored-data cost and capacity | `plan` (`free`, `paid`) | None | 30 days raw, 13 months rollup |
-| `badtower_rows_read_total` | counter | SQLite read cost | `operation` (`reserve`, `submit`, `claim`, `settle`, `capacity`, `version`) | None | 30 days raw, 13 months rollup |
+| `badtower_rows_read_total` | counter | SQLite read cost | `operation` (`meta`, `reserve`, `submit`, `claim`, `settle`, `revoke`, `hasPending`) | None | 30 days raw, 13 months rollup |
 | `badtower_rows_written_total` | counter | SQLite write cost | `operation` | None | 30 days raw, 13 months rollup |
 | `badtower_wake_total` | counter | Offline-wake delivery health, if configured | `result` (`sent`, `failed`, `skipped`) | None | 30 days raw, 13 months rollup |
 | `badtower_abandoned_candidates` | gauge | Reclamation planning | `age_bucket` (whole months, coarse) | None (count only, never ids) | 13 months rollup |

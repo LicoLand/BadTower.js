@@ -12,6 +12,8 @@
  * Requirements:
  *   - node >= 22
  *   - openssl on PATH (station.mjs tls)
+ *   - npm dependencies installed (the installed wrangler bin runs under
+ *     this Node, so it works the same on every platform)
  *   - the published licoarc-client binary on PATH, or LICOARC_CLIENT
  *
  * Usage:
@@ -31,12 +33,15 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const STATION = path.join(ROOT, "scripts", "station.mjs");
 const CLIENT = process.env.LICOARC_CLIENT ?? "licoarc-client";
 const KEEP = process.env.KEEP_INTEROP === "1";
-const NPX = process.platform === "win32" ? "npx.cmd" : "npx";
+// Launch the installed package's JavaScript entry under this Node rather
+// than a shim: spawning npx.cmd without a shell cannot start on Windows.
+const WRANGLER = path.join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "badtower-interop-"));
 const logFile = path.join(work, "wrangler.log");
 fs.writeFileSync(logFile, "");
 let stationProcess = null;
+let stationSpawnError = null;
 let stationLog = "";
 
 function fail(message) {
@@ -112,6 +117,9 @@ function health(port, caFile) {
 async function waitForHealth(port, ca) {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
+    if (stationSpawnError !== null) {
+      fail(`wrangler could not start: ${stationSpawnError.message}\n${stationLog.slice(-4_000)}`);
+    }
     if (stationProcess?.exitCode !== null) {
       fail(`wrangler exited before the Station was healthy:\n${stationLog.slice(-4_000)}`);
     }
@@ -155,9 +163,9 @@ async function main() {
   fs.mkdirSync(xdgConfig, { recursive: true });
 
   stationProcess = spawn(
-    NPX,
+    process.execPath,
     [
-      "wrangler", "dev",
+      WRANGLER, "dev",
       "--local",
       "--ip", "127.0.0.1",
       "--port", String(port),
@@ -184,6 +192,10 @@ async function main() {
   };
   stationProcess.stdout.on("data", capture);
   stationProcess.stderr.on("data", capture);
+  stationProcess.on("error", (error) => {
+    stationSpawnError = error;
+    stationLog += `\nwrangler failed to start: ${error.message}\n`;
+  });
   stationProcess.on("exit", (code) => {
     if (code !== 0 && code !== null) stationLog += `\nwrangler exited ${code}\n`;
   });
@@ -283,7 +295,7 @@ async function main() {
 }
 
 async function cleanup() {
-  if (stationProcess !== null && stationProcess.exitCode === null) {
+  if (stationProcess !== null && stationSpawnError === null && stationProcess.exitCode === null) {
     stationProcess.kill("SIGTERM");
     await Promise.race([
       new Promise((resolve) => stationProcess.once("exit", resolve)),

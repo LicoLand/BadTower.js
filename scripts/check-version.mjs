@@ -79,11 +79,18 @@ try {
 } catch (error) {
   failures.push(`CHANGELOG.md: cannot read (${error.message})`);
 }
-if (changelog.length > 0) {
-  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const headings = changelog.match(new RegExp(`^##\\s+\\[?${escaped}\\]?(?:\\s|$)`, "gm")) ?? [];
-  if (headings.length !== 1) {
-    failures.push(`CHANGELOG.md: expected exactly one '## [${version}]' heading, found ${headings.length}`);
+const releases = changelog.match(/^##\s+.+$/gm) ?? [];
+const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const versionHeading = `^##\\s+\\[?${escaped}\\]?(?:\\s|$)`;
+if (releases.length === 0) {
+  failures.push("CHANGELOG.md: no release headings; the newest release must record the package version");
+} else {
+  if (!new RegExp(versionHeading).test(releases[0])) {
+    failures.push(`CHANGELOG.md: newest release ${JSON.stringify(releases[0])} is not package version ${version}`);
+  }
+  const matches = changelog.match(new RegExp(versionHeading, "gm")) ?? [];
+  if (matches.length !== 1) {
+    failures.push(`CHANGELOG.md: expected exactly one '## [${version}]' heading, found ${matches.length}`);
   }
 }
 

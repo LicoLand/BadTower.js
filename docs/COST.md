@@ -103,9 +103,14 @@ R_do = DO RPC sessions + WebSocket upgrade connections
 
 Outgoing WebSocket messages and WebSocket protocol pings add no request
 charge. Worker WebSocket messages routed through the Worker do not count
-as Worker requests; the connection itself does. Each `stub.submit(...)`,
-`stub.claim(...)`, `stub.settle(...)`, `stub.reserve(...)` and
-`stub.capacityInfo()` is an RPC session and therefore a DO request.
+as Worker requests; the connection itself does. Each `stub.reserve(...)`,
+`stub.submit(...)`, `stub.claim(...)`, `stub.settle(...)`,
+`stub.capacityInfo()` and `stub.revoke()` is an RPC session and therefore
+a DO request — this includes the `licoarc.mailbox.v1` listener's SEND,
+which calls `submit` on the target mailbox's stub. The listener's own
+`claim`, `settle`, `reserve` and `hasPending` run as local `MailboxStore`
+calls inside the object's message handler; they are not RPC sessions and
+cost SQLite rows and active duration instead (see Rows below).
 
 ```
 worker_cost  = max(0, R_w  - included_w)  × rate_w
@@ -150,7 +155,7 @@ duration_cost_paid = max(0, GB_s - 400_000) × $12.50 / 1_000_000
 ## Rows: SQLite reads and writes
 
 ```
-Rows_r = rows examined by reserve/claim/capacity/version queries
+Rows_r = rows examined by meta/reserve/claim/capacity/hasPending queries
 Rows_w = rows inserted/updated/deleted by reserve/submit/settle/revoke
 ```
 
@@ -159,6 +164,12 @@ settle of `k` sequences is `k` deletes; a claim examines up to the
 requested limit; a reserve examines the `meta` row. `deleteAll()` on
 revocation is a write operation and its rows are counted according to the
 platform's row accounting.
+
+The native `version` route answers a fixed constant at the Worker and
+never opens a mailbox: it contributes zero rows and zero `R_do`, only one
+`R_w`. On the `licoarc.mailbox.v1` socket path the claim, settle,
+hasPending and initial meta calls are local to the connection's own
+object, so they count here rather than under `R_do`.
 
 ```
 rows_read_cost    = max(0, Rows_r - included_r) × rate_r
@@ -188,14 +199,17 @@ SQLite page size; measure it rather than trusting the approximation.
 ### 2. Active
 
 Assumptions: `M_active` hibernatable sockets; each device sends `Ws_in`
-messages and receives `Ws_out`; each send causes one `submit` RPC; each
-delivery is ACKed.
+messages and receives `Ws_out`; each SEND submits one packet through the
+target mailbox's `submit` RPC; each delivery is ACKed, and claim/settle
+run locally on the socket's own `MailboxStore`.
 
 ```
 Conn   = M_active
 R_w    = M_active + other inbound requests
-R_do   = M_active + M_active × (submit RPC + claim RPC + settle RPC)
-         + ceil(Ws_in / 20)
+R_do   = M_active + N_send                  # one cross-object submit RPC per SEND
+         + ceil(Ws_in / 20)                 # every incoming frame, HELLO/ACK included
+Rows_r += local claim/hasPending reads per fill
+Rows_w += local settle deletes per ACK
 T_active = Σ handler durations + pending I/O time
 S        = unchanged until settle
 ```
@@ -236,8 +250,10 @@ A single 1 GB mailbox filled with maximum-size packets:
 ```
 F ≈ ceil((1,000,000,000 - 12,000) / (H + 524,288)) ≈ 1,908 submits before H
 Rows_w ≈ F inserts + F deletes after settle
-R_w ≈ F submits + ceil(F/16) claims + ceil(F/16) settles
+R_w ≈ F submits + ceil(F/16) claims + ceil(F/16) settles   (native route)
 R_do ≈ F submit RPCs + ceil(F/16) claim RPCs + ceil(F/16) settle RPCs
+       # claim/settle are RPCs here because the native route drives stub calls;
+       # on the WebSocket listener path they would be local store calls in Rows_*
 S ≈ 1 GB
 GB_month ≈ 1
 storage_cost_paid ≈ max(0, 1 - 5) × $0.20 = $0.00 while total storage ≤ 5 GB-month
