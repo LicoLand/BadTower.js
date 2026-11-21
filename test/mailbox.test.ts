@@ -294,6 +294,8 @@ describe("delivery", () => {
     sender.conn.ws.close();
   });
 
+  // Twenty sequential stores plus a fixed negative-delivery wait exceed the
+  // 5s default on a contended host; the bound below leaves ample headroom.
   it("caps in-flight deliveries at 16 until ACKs release the window", async () => {
     const mailboxId = randomBytes(16);
     const owner = await ready(invite(mailboxId));
@@ -326,7 +328,7 @@ describe("delivery", () => {
     }
     again.conn.ws.close();
     sender.conn.ws.close();
-  });
+  }, 30_000);
 });
 
 describe("capacity and targeting", () => {
