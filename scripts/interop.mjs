@@ -308,21 +308,82 @@ function portFree(port) {
 }
 
 /**
- * Stop the Wrangler tree, not just the launcher. The pinned bin script
- * spawns the real CLI as a child; on Windows kill() maps to
+ * Pids of the launcher's live descendants, Windows only. taskkill /T
+ * walks a tree from its root; once the launcher is gone the survivors
+ * are reachable only through their parent links.
+ */
+function descendants(pid) {
+  try {
+    const out = execFileSync(
+      "powershell",
+      [
+        "-NoProfile", "-Command",
+        `(Get-CimInstance Win32_Process -Filter 'ParentProcessId=${pid}').ProcessId`,
+      ],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return out
+      .split(/\s+/)
+      .map((token) => Number(token))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .flatMap((id) => [id, ...descendants(id)]);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether any member of the Wrangler tree is still alive, tracked
+ * independently of the launcher: on POSIX the detached launcher leads a
+ * process group that outlives its leader, and on Windows a descendant
+ * survives the launcher's own exit.
+ */
+function treeAlive(child) {
+  if (process.platform === "win32") {
+    const launcherAlive = child.exitCode === null && child.signalCode === null;
+    return launcherAlive || descendants(child.pid).length > 0;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Signal the Wrangler tree, not just the launcher. The pinned bin
+ * script spawns the real CLI as a child; on Windows kill() maps to
  * TerminateProcess and drops the launcher before it can forward
- * anything, so taskkill /T removes the whole tree. On POSIX the
- * launcher leads a process group and the group gets the signal.
+ * anything, so taskkill /T removes the whole tree and the descendant
+ * pass reaches survivors of an already-dead root. On POSIX the launcher
+ * leads a process group and the group gets the signal, leader alive or
+ * not.
  */
 function stopTree(child, signal) {
   try {
     if (process.platform === "win32") {
-      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      try {
+        execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } catch {
+        // The launcher is already gone; its descendants are killed below.
+      }
+      for (const pid of descendants(child.pid)) {
+        try {
+          execFileSync("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore" });
+        } catch {
+          // Raced exit.
+        }
+      }
     } else {
       try {
         process.kill(-child.pid, signal);
       } catch {
-        child.kill(signal);
+        try {
+          child.kill(signal);
+        } catch {
+          // Group and launcher are both gone.
+        }
       }
     }
   } catch {
@@ -330,34 +391,90 @@ function stopTree(child, signal) {
   }
 }
 
+/**
+ * Stop the Wrangler tree and confirm it is gone. The grace and
+ * escalation windows cover the whole tree, not only the launcher: a
+ * launcher that exits while a descendant still serves the Station port
+ * does not end or suppress escalation. Returns true only when no tree
+ * member remains.
+ */
 async function stopStation() {
   const child = stationProcess;
-  if (child === null || stationSpawnError !== null || child.exitCode !== null) return;
+  if (child === null || stationSpawnError !== null) return true;
   const exited = new Promise((resolve) => child.once("exit", resolve));
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 250));
   stopTree(child, "SIGTERM");
-  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
-  if (child.exitCode === null) {
-    stopTree(child, "SIGKILL");
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  let deadline = Date.now() + 10_000;
+  while (treeAlive(child) && Date.now() < deadline) {
+    await Promise.race([exited, pause()]);
   }
+  deadline = Date.now() + 10_000;
+  while (treeAlive(child) && Date.now() < deadline) {
+    stopTree(child, "SIGKILL");
+    await Promise.race([exited, pause()]);
+  }
+  return !treeAlive(child);
 }
 
-async function cleanup() {
-  await stopStation();
-  // Verify teardown: the CLI must not keep the port after the launcher
-  // exits, on success and on failure, before the state dir is removed.
-  if (stationPort !== null) {
+async function teardown() {
+  const stopped = await stopStation();
+  // Verify teardown before removing state: no surviving tree member may
+  // keep the port, on success and on failure.
+  let released = true;
+  if (stopped && stationPort !== null) {
     const deadline = Date.now() + 10_000;
     while (!(await portFree(stationPort)) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    if (!(await portFree(stationPort))) {
+    released = await portFree(stationPort);
+    if (!released) {
       console.error(`interop: port ${stationPort} is still bound after Wrangler shutdown`);
       process.exitCode = 1;
     }
   }
-  if (!KEEP) fs.rmSync(work, { recursive: true, force: true });
-  else console.log(`interop: kept ${work}`);
+  if (!stopped) {
+    console.error("interop: Wrangler descendants are still alive after shutdown escalation");
+    process.exitCode = 1;
+  }
+  if (stopped && released) {
+    if (!KEEP) fs.rmSync(work, { recursive: true, force: true });
+    else console.log(`interop: kept ${work}`);
+  } else {
+    // Shutdown is unconfirmed: the state dir stays so the minted
+    // credentials remain inspectable and removable.
+    console.error(`interop: kept ${work}; teardown could not be confirmed`);
+  }
+}
+
+let cleanupPromise = null;
+/**
+ * The single teardown path shared by the normal exit and the signal
+ * handlers; it runs exactly once no matter how many triggers race it.
+ */
+function cleanup() {
+  cleanupPromise ??= teardown();
+  return cleanupPromise;
+}
+
+// Interrupts run the same teardown as a normal exit, then die by the
+// same signal so the wait status records the interruption rather than
+// a clean exit. The detached Wrangler group never sees the terminal's
+// SIGINT, so without this a Ctrl-C would leave the tree alive with the
+// minted credentials on disk.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    void cleanup().finally(() => {
+      process.removeAllListeners("SIGINT");
+      process.removeAllListeners("SIGTERM");
+      const code = signal === "SIGINT" ? 130 : 143;
+      try {
+        process.kill(process.pid, signal);
+      } catch {
+        process.exit(code);
+      }
+      setTimeout(() => process.exit(code), 500).unref();
+    });
+  });
 }
 
 try {

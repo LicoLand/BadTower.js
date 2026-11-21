@@ -50,6 +50,11 @@ class FakeSql {
     return D0 + Math.ceil(this.payloadBytes / PAGE) * PAGE;
   }
 
+  /** Real SQLite answers queries on a missing table with an error. */
+  private require(table: string): void {
+    if (!this.tables.has(table)) throw new Error(`no such table: ${table}`);
+  }
+
   exec(query: string, ...params: unknown[]): { toArray(): unknown[] } {
     const sql = query.replace(/\s+/g, " ").trim();
     if (sql.startsWith("CREATE TABLE")) {
@@ -57,16 +62,18 @@ class FakeSql {
       return { toArray: () => [] };
     }
     if (sql === "SELECT subject, revoked FROM meta WHERE id = 0") {
-      if (!this.tables.has("meta")) throw new Error("no such table: meta");
+      this.require("meta");
       return { toArray: () => (this.meta === null ? [] : [this.meta]) };
     }
     if (sql.startsWith("INSERT INTO meta")) {
+      this.require("meta");
       this.meta = params.length === 0
         ? { subject: null, revoked: 1 }
         : { subject: params[0] as ArrayBuffer, revoked: 0 };
       return { toArray: () => [] };
     }
     if (sql.startsWith("INSERT INTO packet")) {
+      this.require("packet");
       const handle = params[0] as ArrayBuffer;
       const body = params[1] as ArrayBuffer;
       const projected = D0 + Math.ceil((this.payloadBytes + handle.byteLength + body.byteLength + ROW_OVERHEAD) / PAGE) * PAGE;
@@ -79,6 +86,7 @@ class FakeSql {
       return { toArray: () => [] };
     }
     if (sql.startsWith("SELECT seq, handle, body FROM packet WHERE seq NOT IN")) {
+      this.require("packet");
       const limit = params[params.length - 1] as number;
       const excluded = new Set(params.slice(0, -1) as number[]);
       const rows = [...this.packets.entries()]
@@ -89,6 +97,7 @@ class FakeSql {
       return { toArray: () => rows };
     }
     if (sql.startsWith("SELECT seq, handle, body FROM packet ORDER BY seq LIMIT")) {
+      this.require("packet");
       const limit = params[0] as number;
       const rows = [...this.packets.entries()]
         .sort(([a], [b]) => a - b)
@@ -97,13 +106,16 @@ class FakeSql {
       return { toArray: () => rows };
     }
     if (sql === "SELECT seq FROM packet LIMIT 1") {
+      this.require("packet");
       const first = [...this.packets.keys()][0];
       return { toArray: () => (first === undefined ? [] : [{ seq: first }]) };
     }
     if (sql === "SELECT COUNT(*) AS n FROM packet") {
+      this.require("packet");
       return { toArray: () => [{ n: this.packets.size }] };
     }
     if (sql.startsWith("DELETE FROM packet WHERE seq")) {
+      this.require("packet");
       this.packets.delete(params[0] as number);
       return { toArray: () => [] };
     }
@@ -169,6 +181,22 @@ describe("capacity accounting", () => {
     expect(isStorageFull(new Error("storage is full"))).toBe(true);
     expect(isStorageFull(new Error("SQLITE_CONSTRAINT"))).toBe(false);
     expect(isStorageFull("SQLITE_FULL")).toBe(false);
+  });
+});
+
+describe("revocation", () => {
+  it("revoke on a never-bound mailbox skips packet counting and persists the tombstone", async () => {
+    const calls: Calls = [];
+    const { sql, store } = fixture(1_000_000_000, calls);
+    await store.revoke();
+    expect(sql.meta).toEqual({ subject: null, revoked: 1 });
+    expect(store.revoked()).toBe(true);
+    expect(store.canBind(live())).toBe("closed");
+    expect(store.reserve(subject(), live())).toBe("revoked");
+    // No packet table existed, so no revoke read was metered; the
+    // tombstone alone counts as the written row.
+    expect(calls).not.toContainEqual(["rowsRead", "revoke", 1]);
+    expect(calls).toContainEqual(["rowsWritten", "revoke", 1]);
   });
 });
 

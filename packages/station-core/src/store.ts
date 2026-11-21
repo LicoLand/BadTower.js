@@ -261,13 +261,19 @@ export class MailboxStore {
   async revoke(): Promise<void> {
     // Cloudflare counts deleteAll()'s removed rows as rows written;
     // COUNT(*) first keeps the aggregate honest. The extra read is once
-    // per mailbox lifetime and cheaper than guessing.
-    const remaining = Number(
-      (this.ctx.storage.sql
-        .exec("SELECT COUNT(*) AS n FROM packet")
-        .toArray()[0] as { n: unknown } | undefined)?.n ?? 0,
-    );
-    this.meter()?.rowsRead("revoke", 1);
+    // per mailbox lifetime and cheaper than guessing — but it can only
+    // run where a schema exists: a never-bound mailbox has no packet
+    // table, and skipping the count must not skip the tombstone below.
+    const meta = this.loadMeta();
+    let remaining = 0;
+    if (meta.subject !== null || meta.revoked) {
+      remaining = Number(
+        (this.ctx.storage.sql
+          .exec("SELECT COUNT(*) AS n FROM packet")
+          .toArray()[0] as { n: unknown } | undefined)?.n ?? 0,
+      );
+      this.meter()?.rowsRead("revoke", 1);
+    }
     this.meter()?.rowsWritten("revoke", remaining + 1);
     await this.ctx.storage.deleteAll();
     // deleteAll drops the tables too; the tombstone needs meta back.

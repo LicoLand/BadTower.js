@@ -258,6 +258,18 @@ describe("capacity and revocation", () => {
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([1, 1]));
   });
 
+  it("revokes a never-bound mailbox: tombstone persists, reserve refuses", async () => {
+    const mailboxId = randomBytes(16);
+    const mac = createHmac("sha256", stationKey()).update(Buffer.concat([Buffer.from("btr1"), mailboxId])).digest();
+    const revoke = await SELF.fetch("https://station.test/v1/revoke", {
+      method: "POST",
+      headers: OCTETS,
+      body: Buffer.concat([mailboxId, mac]),
+    });
+    expect(revoke.status).toBe(204);
+    expect((await post("/v1/native/reserve", mailboxId, subject())).status).toBe(403);
+  });
+
   it("writes no schema for a mailbox that never binds", async () => {
     const mailboxId = randomBytes(16);
     const res = await post("/v1/native/reserve", mailboxId, subject(), Math.floor(Date.now() / 1000) - 60);

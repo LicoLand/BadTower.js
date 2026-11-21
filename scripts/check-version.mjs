@@ -85,14 +85,29 @@ try {
 // brackets is malformed rather than silently ignored. The same list
 // drives both the newest-release ordering check and the duplicate count.
 const releases = [];
-let inFence = false;
+// GFM fences: a block opens on three or more backticks or tildes (up to
+// three leading spaces) and closes only on the same character repeated
+// at least as many times, with nothing else on the line — so a ```
+// inside a ```` example does not end it. A backtick opener whose info
+// string contains a backtick is not a fence at all.
+let fence = null;
 for (const line of changelog.split("\n")) {
-  if (/^\s*(```|~~~)/.test(line)) {
-    inFence = !inFence;
+  if (fence !== null) {
+    const closing = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
+    if (closing !== null && closing[1][0] === fence.char && closing[1].length >= fence.length) {
+      fence = null;
+    }
     continue;
   }
-  if (inFence || !/^##(?:\s|$)/.test(line)) continue;
-  const heading = /^##\s+\[([^\]]+)\]/.exec(line);
+  const opening = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (opening !== null && (opening[1][0] === "~" || !line.slice(opening[0].length).includes("`"))) {
+    fence = { char: opening[1][0], length: opening[1].length };
+    continue;
+  }
+  if (!/^##(?:\s|$)/.test(line)) continue;
+  // The bracketed token must be complete: `## [x]]` is malformed, not
+  // version x with trailing text.
+  const heading = /^##\s+\[([^\]]+)\](?=\s|$)/.exec(line);
   if (heading === null) {
     failures.push(`CHANGELOG.md: release heading is not '## [version] ...': ${JSON.stringify(line)}`);
   } else {

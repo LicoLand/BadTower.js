@@ -64,7 +64,7 @@ implementation inputs, not Cloudflare prices.
 | `T_active` | wall-clock seconds the object is active and not hibernating |
 | `Rows_r`, `Rows_w` | SQLite rows read / written |
 | `Ws_in`, `Ws_out` | WebSocket messages received / sent, totaled across all sockets |
-| `Conn` | WebSocket connection establishments |
+| `Conn` | WebSocket connection establishments within the billing period |
 
 All byte-to-GB conversions below use `1 GB = 1,000,000,000 bytes` to match
 Cloudflare's published `128 MB / 1 GB = 0.128` duration example. Verify
@@ -203,18 +203,19 @@ SQLite page size; measure it rather than trusting the approximation.
 Assumptions: `M_active` hibernatable sockets; `Ws_in` and `Ws_out` are
 the incoming and outgoing frame totals across all sockets for the
 billing period; each SEND submits one packet through the target
-mailbox's `submit` RPC; each delivery is ACKed, and claim/settle run
-locally on the socket's own `MailboxStore`.
+mailbox's `submit` RPC and each accepted submit inserts one packet row
+and grows that mailbox's database immediately; each delivery is ACKed,
+and claim/settle run locally on the socket's own `MailboxStore`.
 
 ```
-Conn   = M_active
-R_w    = M_active + other inbound requests
-R_do   = M_active + N_send                  # one cross-object submit RPC per SEND
-         + ceil(Ws_in / 20)                 # every incoming frame, HELLO/ACK included
+Conn   = upgrades within the billing period  # carried-over sockets do not re-pay; reconnects pay again
+R_w    = Conn + other inbound requests
+R_do   = Conn + N_send                       # one cross-object submit RPC per SEND
+         + ceil(Ws_in / 20)                  # every incoming frame, HELLO/ACK included
 Rows_r += local claim/hasPending reads per fill
-Rows_w += local settle deletes per ACK
+Rows_w += one insert per accepted SEND + settle deletes per ACK
 T_active = Σ handler durations + pending I/O time
-S        = unchanged until settle
+S        = grows by H + P_i per accepted SEND, released on settle
 ```
 
 The dominant cost is usually duration if the object cannot hibernate, and
