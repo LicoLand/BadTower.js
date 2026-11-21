@@ -63,7 +63,7 @@ implementation inputs, not Cloudflare prices.
 | `R_do` | Durable Object requests |
 | `T_active` | wall-clock seconds the object is active and not hibernating |
 | `Rows_r`, `Rows_w` | SQLite rows read / written |
-| `Ws_in`, `Ws_out` | WebSocket messages received / sent |
+| `Ws_in`, `Ws_out` | WebSocket messages received / sent, totaled across all sockets |
 | `Conn` | WebSocket connection establishments |
 
 All byte-to-GB conversions below use `1 GB = 1,000,000,000 bytes` to match
@@ -155,15 +155,17 @@ duration_cost_paid = max(0, GB_s - 400_000) × $12.50 / 1_000_000
 ## Rows: SQLite reads and writes
 
 ```
-Rows_r = rows examined by meta/reserve/claim/capacity/hasPending queries
+Rows_r = rows examined by meta/reserve/claim/capacity/hasPending/revoke queries
 Rows_w = rows inserted/updated/deleted by reserve/submit/settle/revoke
 ```
 
 Cloudflare counts deletes as rows written. A submit is one insert; a
 settle of `k` sequences is `k` deletes; a claim examines up to the
-requested limit; a reserve examines the `meta` row. `deleteAll()` on
-revocation is a write operation and its rows are counted according to the
-platform's row accounting.
+requested limit; a reserve examines the `meta` row. Revocation reads
+the packet count (`SELECT COUNT(*)`, the `revoke` read label) before
+`deleteAll()` removes the data; `deleteAll()` itself is a write
+operation and its rows are counted according to the platform's row
+accounting.
 
 The native `version` route answers a fixed constant at the Worker and
 never opens a mailbox: it contributes zero rows and zero `R_do`, only one
@@ -198,10 +200,11 @@ SQLite page size; measure it rather than trusting the approximation.
 
 ### 2. Active
 
-Assumptions: `M_active` hibernatable sockets; each device sends `Ws_in`
-messages and receives `Ws_out`; each SEND submits one packet through the
-target mailbox's `submit` RPC; each delivery is ACKed, and claim/settle
-run locally on the socket's own `MailboxStore`.
+Assumptions: `M_active` hibernatable sockets; `Ws_in` and `Ws_out` are
+the incoming and outgoing frame totals across all sockets for the
+billing period; each SEND submits one packet through the target
+mailbox's `submit` RPC; each delivery is ACKed, and claim/settle run
+locally on the socket's own `MailboxStore`.
 
 ```
 Conn   = M_active

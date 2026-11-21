@@ -79,18 +79,35 @@ try {
 } catch (error) {
   failures.push(`CHANGELOG.md: cannot read (${error.message})`);
 }
-const releases = changelog.match(/^##\s+.+$/gm) ?? [];
-const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const versionHeading = `^##\\s+\\[?${escaped}\\]?(?:\\s|$)`;
+// Release headings are exactly `## [version] ...` on one line. Walk the
+// file line by line and skip fenced code blocks so a documented example
+// cannot be mistaken for a release; a `##` heading without paired
+// brackets is malformed rather than silently ignored. The same list
+// drives both the newest-release ordering check and the duplicate count.
+const releases = [];
+let inFence = false;
+for (const line of changelog.split("\n")) {
+  if (/^\s*(```|~~~)/.test(line)) {
+    inFence = !inFence;
+    continue;
+  }
+  if (inFence || !/^##(?:\s|$)/.test(line)) continue;
+  const heading = /^##\s+\[([^\]]+)\]/.exec(line);
+  if (heading === null) {
+    failures.push(`CHANGELOG.md: release heading is not '## [version] ...': ${JSON.stringify(line)}`);
+  } else {
+    releases.push({ line, version: heading[1] });
+  }
+}
 if (releases.length === 0) {
   failures.push("CHANGELOG.md: no release headings; the newest release must record the package version");
 } else {
-  if (!new RegExp(versionHeading).test(releases[0])) {
-    failures.push(`CHANGELOG.md: newest release ${JSON.stringify(releases[0])} is not package version ${version}`);
+  if (releases[0].version !== version) {
+    failures.push(`CHANGELOG.md: newest release ${JSON.stringify(releases[0].line)} is not package version ${version}`);
   }
-  const matches = changelog.match(new RegExp(versionHeading, "gm")) ?? [];
-  if (matches.length !== 1) {
-    failures.push(`CHANGELOG.md: expected exactly one '## [${version}]' heading, found ${matches.length}`);
+  const occurrences = releases.filter((release) => release.version === version).length;
+  if (occurrences !== 1) {
+    failures.push(`CHANGELOG.md: expected exactly one '## [${version}]' heading, found ${occurrences}`);
   }
 }
 

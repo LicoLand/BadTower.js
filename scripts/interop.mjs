@@ -42,6 +42,7 @@ const logFile = path.join(work, "wrangler.log");
 fs.writeFileSync(logFile, "");
 let stationProcess = null;
 let stationSpawnError = null;
+let stationPort = null;
 let stationLog = "";
 
 function fail(message) {
@@ -145,6 +146,7 @@ async function main() {
   const stationDir = path.join(work, "station");
   const ca = path.join(stationDir, "tls", "ca.crt");
   const port = await freePort();
+  stationPort = port;
 
   console.log(`interop: station dir ${work}`);
   runStation(["init", "--dir", stationDir]);
@@ -180,6 +182,9 @@ async function main() {
       cwd: ROOT,
       env: { ...process.env, WRANGLER_HOME: wranglerHome, XDG_CONFIG_HOME: xdgConfig },
       stdio: ["ignore", "pipe", "pipe"],
+      // On POSIX a detached launcher leads a process group containing
+      // the CLI it spawns, so teardown can signal the whole tree.
+      detached: process.platform !== "win32",
     },
   );
   const capture = (chunk) => {
@@ -294,13 +299,62 @@ async function main() {
   );
 }
 
+function portFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(false));
+    probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
+  });
+}
+
+/**
+ * Stop the Wrangler tree, not just the launcher. The pinned bin script
+ * spawns the real CLI as a child; on Windows kill() maps to
+ * TerminateProcess and drops the launcher before it can forward
+ * anything, so taskkill /T removes the whole tree. On POSIX the
+ * launcher leads a process group and the group gets the signal.
+ */
+function stopTree(child, signal) {
+  try {
+    if (process.platform === "win32") {
+      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        child.kill(signal);
+      }
+    }
+  } catch {
+    // The tree already exited on its own.
+  }
+}
+
+async function stopStation() {
+  const child = stationProcess;
+  if (child === null || stationSpawnError !== null || child.exitCode !== null) return;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  stopTree(child, "SIGTERM");
+  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+  if (child.exitCode === null) {
+    stopTree(child, "SIGKILL");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  }
+}
+
 async function cleanup() {
-  if (stationProcess !== null && stationSpawnError === null && stationProcess.exitCode === null) {
-    stationProcess.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => stationProcess.once("exit", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 5_000)),
-    ]);
+  await stopStation();
+  // Verify teardown: the CLI must not keep the port after the launcher
+  // exits, on success and on failure, before the state dir is removed.
+  if (stationPort !== null) {
+    const deadline = Date.now() + 10_000;
+    while (!(await portFree(stationPort)) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!(await portFree(stationPort))) {
+      console.error(`interop: port ${stationPort} is still bound after Wrangler shutdown`);
+      process.exitCode = 1;
+    }
   }
   if (!KEEP) fs.rmSync(work, { recursive: true, force: true });
   else console.log(`interop: kept ${work}`);
