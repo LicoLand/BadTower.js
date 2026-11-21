@@ -6,8 +6,13 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const STATION = path.resolve("scripts/station.mjs");
+// Every test here shells out to node/openssl; on a contended host one
+// spawn can cost seconds, so both child and suite bounds exceed the
+// 5s default. A wedged child dies at CHILD_TIMEOUT instead of hanging.
+const CHILD_TIMEOUT = 30_000;
+const TEST_TIMEOUT = 60_000;
 const run = (args: string[]) =>
-  execFileSync("node", [STATION, ...args], { encoding: "utf8" });
+  execFileSync("node", [STATION, ...args], { encoding: "utf8", timeout: CHILD_TIMEOUT });
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "badtower-station-test-"));
@@ -25,7 +30,7 @@ describe("station.mjs init", () => {
     expect((fs.statSync(path.join(dir, ".dev.vars")).mode & 0o777)).toBe(0o600);
     expect((fs.statSync(dir).mode & 0o777)).toBe(0o700);
     expect(() => run(["init", "--dir", dir])).toThrow();
-  });
+  }, TEST_TIMEOUT);
 });
 
 describe("station.mjs invite", () => {
@@ -48,7 +53,7 @@ describe("station.mjs invite", () => {
     expect(raw.subarray(24)).toEqual(expected);
     expect(output).toContain(mailboxId.toString("hex"));
     expect((fs.statSync(out).mode & 0o777)).toBe(0o600);
-  });
+  }, TEST_TIMEOUT);
 });
 
 describe("station.mjs private output boundary", () => {
@@ -63,7 +68,7 @@ describe("station.mjs private output boundary", () => {
     const strayInvite = path.join(repo, "stray.invitation");
     expect(() => run(["invite", "--dir", dir, "--out", strayInvite])).toThrow();
     expect(fs.existsSync(strayInvite)).toBe(false);
-  });
+  }, TEST_TIMEOUT);
 
   it("accepts private outputs under the ignored data/ root", () => {
     const dir = path.join(repo, "data", `station-test-${process.pid}`);
@@ -77,7 +82,7 @@ describe("station.mjs private output boundary", () => {
     } finally {
       fs.rmSync(dir, { force: true, recursive: true });
     }
-  });
+  }, TEST_TIMEOUT);
 });
 
 describe("station.mjs tls", () => {
@@ -105,5 +110,5 @@ describe("station.mjs tls", () => {
     expect(text).toContain("DNS:station.test");
     expect((fs.statSync(path.join(tlsDir, "ca.key")).mode & 0o777)).toBe(0o600);
     expect((fs.statSync(path.join(tlsDir, "server.key")).mode & 0o777)).toBe(0o600);
-  });
+  }, TEST_TIMEOUT);
 });
