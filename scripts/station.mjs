@@ -377,14 +377,20 @@ function cmdMetricsKey({ flags }) {
     .map((entry) => [entry.start, entry.end])
     .sort((a, b) => b[0] - a[0]);
   for (const [start, end] of spans) kept = kept.slice(0, start) + kept.slice(end);
-  // Only surplus trailing newlines are dropped; other trailing
-  // whitespace belongs to the last line. An empty colon-form tail like
-  // `OPTIONAL: ` parses as an empty value BECAUSE that space completes
-  // its `:` separator — stripping it would leave `OPTIONAL:` whose
-  // `:`+newline separator then swallows the appended assignment as
-  // OPTIONAL's value, hiding the metrics binding from Wrangler.
-  kept = kept.replace(/\n+$/, "");
-  const next = `${kept}${kept === "" ? "" : "\n"}BADTOWER_METRICS_KEY=${key}\n`;
+  // The kept settings keep their own trailing newlines; what the
+  // appended assignment needs is a BLANK line before it. A kept tail
+  // like `OPTIONAL:` — bare, or followed by any number of newlines —
+  // completes its `:` separator with the NEXT newline under the
+  // pinned grammar, so the assignment on the line right after a
+  // single `\n` is parsed as OPTIONAL's value and the metrics
+  // binding disappears from Wrangler's view. Padding short of two
+  // trailing newlines guarantees the blank line that ends the empty
+  // value instead. Other trailing whitespace still belongs to the
+  // last line: `OPTIONAL: ` keeps the space completing its separator.
+  if (kept !== "" && !kept.endsWith("\n\n")) {
+    kept += kept.endsWith("\n") ? "\n" : "\n\n";
+  }
+  const next = `${kept}BADTOWER_METRICS_KEY=${key}\n`;
   writePrivate(varsFile, next);
   writePrivate(keyFile, `${key}\n`);
   console.log(`metrics credential written to ${keyFile}`);

@@ -238,6 +238,30 @@ describe("station.mjs metrics-key", () => {
     expect(parsed.BADTOWER_METRICS_KEY).toBe(metricsKey);
   }, TEST_TIMEOUT);
 
+  it("keeps a newline-terminated empty colon-form tail from absorbing the credential", async () => {
+    // `OPTIONAL:` completes its `:` separator with the next newline,
+    // so the appended assignment must sit behind a blank line: one
+    // newline short, the pinned parser reads the assignment as
+    // OPTIONAL's value and Wrangler loses the metrics binding. The
+    // bare, single-newline and multi-newline tails all end that way.
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    for (const tail of ["OPTIONAL:", "OPTIONAL:\n", "OPTIONAL:\n\n"]) {
+      const dir = path.join(tempDir(), "station");
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+      fs.writeFileSync(path.join(dir, ".dev.vars"),
+        `BADTOWER_STATION_KEY=${key}\n${tail}`, { mode: 0o600 });
+      await run(["metrics-key", "--dir", dir]);
+      const after = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
+      const metricsKey = fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim();
+      expect(Buffer.from(metricsKey, "base64url")).toHaveLength(32);
+      const parsed = parseDotenv(after);
+      expect(parsed.BADTOWER_STATION_KEY).toBe(key);
+      expect(parsed.OPTIONAL).toBe("");
+      expect(parsed.BADTOWER_METRICS_KEY).toBe(metricsKey);
+    }
+  }, TEST_TIMEOUT);
+
   it("leaves an unrelated multiline value byte-identical while rewriting", async () => {
     const dir = path.join(tempDir(), "station");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
