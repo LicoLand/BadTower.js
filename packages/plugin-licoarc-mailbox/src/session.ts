@@ -213,6 +213,14 @@ export class LicoArcMailbox {
       this.close(ws, CLOSE_POLICY);
       return;
     }
+    // The recorded transport owns recipient access: a mailbox bound
+    // through another surface answers this listener as if unbound,
+    // even when HELLO proves the same subject — and an unrecorded
+    // binding admits nothing until a verified bind records one.
+    if (this.deps.store.boundVia() !== "listener") {
+      this.close(ws, CLOSE_POLICY);
+      return;
+    }
     ws.serializeAttachment({ state: "ready", inflight: [] } satisfies Attachment);
     for (const other of this.deps.ctx.getWebSockets()) {
       if (other !== ws && this.attachment(other).state === "ready") {
@@ -258,7 +266,12 @@ export class LicoArcMailbox {
         return;
       }
       case "ack": {
-        this.deps.store.settle([frame.sequence]);
+        // Only a packet delivered on this socket may be settled: a
+        // delayed, duplicated or forged ACK for a sequence outside the
+        // in-flight set is ignored, so it can never delete a newer
+        // packet or interfere with another session's deliveries.
+        if (!attachment.inflight.includes(frame.sequence)) return;
+        this.deps.store.listenerSettle([frame.sequence]);
         attachment.inflight = attachment.inflight.filter(
           (sequence) => sequence !== frame.sequence,
         );
@@ -274,7 +287,7 @@ export class LicoArcMailbox {
   private fill(ws: WebSocket, attachment: Attachment & { state: "ready" }): void {
     const room = IN_FLIGHT_WINDOW - attachment.inflight.length;
     if (room > 0) {
-      const packets = this.deps.store.claim(attachment.inflight, room) ?? [];
+      const packets = this.deps.store.listenerClaim(attachment.inflight, room) ?? [];
       for (const packet of packets) {
         this.send(ws, {
           kind: "deliver",
@@ -286,7 +299,7 @@ export class LicoArcMailbox {
       }
       if (attachment.inflight.length > 0) ws.serializeAttachment(attachment);
     }
-    if (attachment.inflight.length === 0 && !this.deps.store.hasPending()) {
+    if (attachment.inflight.length === 0 && !this.deps.store.listenerHasPending()) {
       this.send(ws, { kind: "drained" });
     }
   }

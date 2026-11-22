@@ -205,6 +205,47 @@ describe("submit → claim → settle", () => {
   });
 });
 
+describe("unrecorded binding transition", () => {
+  it("restores recipient access only through a verified re-bind and preserves queued packets", async () => {
+    const mailboxId = randomBytes(16);
+    const stub = env.MAILBOX.getByName(Buffer.from(mailboxId).toString("hex"));
+    const bound = subject();
+    // A mailbox bound before binding records existed: meta and packet
+    // rows only, so no durable transport is recorded.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), subject BLOB, revoked INTEGER NOT NULL DEFAULT 0)",
+      );
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS packet(seq INTEGER PRIMARY KEY, handle BLOB NOT NULL, body BLOB NOT NULL)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
+        new Uint8Array(bound).buffer,
+      );
+      state.storage.sql.exec(
+        "INSERT INTO packet(seq, handle, body) VALUES(?, ?, ?)",
+        7,
+        new Uint8Array(handleFor(mailboxId)).buffer,
+        new Uint8Array(randomBytes(6)).buffer,
+      );
+    });
+    // Submissions and recipient operations refuse while no transport is
+    // recorded — the mailbox cannot receive through either surface.
+    const refused = await submit(handleFor(mailboxId), randomBytes(8));
+    expect(new Uint8Array(await refused.arrayBuffer())).toEqual(new Uint8Array([1, 1]));
+    expect((await claim(mailboxId)).status).toBe(403);
+    // A different subject cannot take the mailbox over; the stored
+    // subject's re-reserve records the native binding.
+    expect((await post("/v1/native/reserve", mailboxId, subject())).status).toBe(409);
+    expect((await post("/v1/native/reserve", mailboxId, bound)).status).toBe(200);
+    const { packets } = await claim(mailboxId);
+    expect(packets!.map((p) => p.sequence)).toEqual([7]);
+    const res = await submit(handleFor(mailboxId), randomBytes(8));
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([0, 255]));
+  });
+});
+
 describe("capacity and revocation", () => {
   it("reports capacity only for bound mailboxes", async () => {
     const mailboxId = randomBytes(16);

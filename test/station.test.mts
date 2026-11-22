@@ -21,9 +21,9 @@ interface Spawned {
   timedOut: boolean;
 }
 
-function spawnCmd(file: string, args: string[]): Promise<Spawned> {
+function spawnCmd(file: string, args: string[], env: Partial<NodeJS.ProcessEnv> = {}): Promise<Spawned> {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { detached: true });
+    const child = spawn(file, args, { detached: true, env: { ...process.env, ...env } });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -48,8 +48,8 @@ function spawnCmd(file: string, args: string[]): Promise<Spawned> {
   });
 }
 
-async function run(args: string[]): Promise<string> {
-  const r = await spawnCmd("node", [STATION, ...args]);
+async function run(args: string[], env: Partial<NodeJS.ProcessEnv> = {}): Promise<string> {
+  const r = await spawnCmd("node", [STATION, ...args], env);
   if (r.timedOut) throw new Error(`station ${args.join(" ")} timed out after ${CHILD_TIMEOUT}ms`);
   if (r.status !== 0) throw new Error(`station ${args.join(" ")} exited ${r.status}: ${r.stderr.trim()}`);
   return r.stdout;
@@ -110,7 +110,58 @@ describe("station.mjs metrics-key", () => {
     const vars = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
     expect(vars).toContain(`BADTOWER_METRICS_KEY=${metricsKey}`);
     expect((fs.statSync(path.join(dir, "metrics.key")).mode & 0o777)).toBe(0o600);
-    await expectRefusal(["metrics-key", "--dir", dir], /station: .*already exists; refusing to overwrite/);
+    // Rerunning is safe and converges on the same value.
+    await run(["metrics-key", "--dir", dir]);
+    expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(metricsKey);
+    expect(fs.readFileSync(path.join(dir, ".dev.vars"), "utf8"))
+      .toContain(`BADTOWER_METRICS_KEY=${metricsKey}`);
+  }, TEST_TIMEOUT);
+
+  it("adopts an existing .dev.vars credential instead of minting a divergent one", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    const deployed = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    // Deploy uploads this entry: metrics.key must adopt it, or the CLI
+    // and the Worker would expect different credentials.
+    fs.writeFileSync(path.join(dir, ".dev.vars"),
+      `BADTOWER_STATION_KEY=${key}\nBADTOWER_METRICS_KEY=${deployed}\n`, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(deployed);
+    expect(fs.readFileSync(path.join(dir, ".dev.vars"), "utf8"))
+      .toContain(`BADTOWER_METRICS_KEY=${deployed}`);
+  }, TEST_TIMEOUT);
+
+  it("repairs an empty .dev.vars entry in place rather than appending a second", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"),
+      `BADTOWER_STATION_KEY=${key}\nBADTOWER_METRICS_KEY=\n`, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    const metricsKey = fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim();
+    expect(Buffer.from(metricsKey, "base64url")).toHaveLength(32);
+    const lines = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8").split("\n")
+      .filter((line) => line.startsWith("BADTOWER_METRICS_KEY="));
+    expect(lines).toEqual([`BADTOWER_METRICS_KEY=${metricsKey}`]);
+  }, TEST_TIMEOUT);
+
+  it("converges an interrupted run: metrics.key survives into .dev.vars", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    const half = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, "metrics.key"), `${half}\n`, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    // The surviving credential is adopted rather than rotated out from
+    // under a deploy that may already carry it.
+    expect(fs.readFileSync(path.join(dir, ".dev.vars"), "utf8"))
+      .toContain(`BADTOWER_METRICS_KEY=${half}`);
+    expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(half);
   }, TEST_TIMEOUT);
 });
 
@@ -184,6 +235,63 @@ describe("station.mjs private output boundary", () => {
     } finally {
       fs.rmSync(dir, { force: true, recursive: true });
     }
+  }, TEST_TIMEOUT);
+
+  it("refuses a write destination that is a dangling link", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`, { mode: 0o600 });
+    // metrics.key as a dangling link: the actual write destination
+    // cannot be resolved, so it is refused rather than followed.
+    fs.symlinkSync(path.join(dir, "gone"), path.join(dir, "metrics.key"));
+    await expectRefusal(["metrics-key", "--dir", dir], /station: cannot resolve/);
+  }, TEST_TIMEOUT);
+
+  it("refuses a child write that escapes its private directory through a link", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`, { mode: 0o600 });
+    // .dev.vars linked at an outside file: directory-level checks pass,
+    // but the file's physical destination escapes.
+    const outside = path.join(tempDir(), "stolen.vars");
+    fs.writeFileSync(outside, "");
+    fs.rmSync(path.join(dir, ".dev.vars"));
+    fs.symlinkSync(outside, path.join(dir, ".dev.vars"));
+    await expectRefusal(["metrics-key", "--dir", dir], /station: .*escapes its private directory/);
+    expect(fs.readFileSync(outside, "utf8")).toBe("");
+  }, TEST_TIMEOUT);
+});
+
+describe("station.mjs cloudflare-deploy", () => {
+  it("keeps the generated config beside the original so its relative main resolves", async () => {
+    const dir = path.join(tempDir(), "station");
+    await run(["init", "--dir", dir]);
+    const binDir = tempDir();
+    const argvLog = path.join(binDir, "argv");
+    // A stub npx records the exact argv the deploy hands Wrangler.
+    fs.writeFileSync(
+      path.join(binDir, "npx"),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${argvLog}'\n`,
+      { mode: 0o755 },
+    );
+    const out = await run(
+      ["cloudflare-deploy", "--dir", dir, "--domain", "station.example"],
+      { PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+    );
+    expect(out).toContain("deployed to cloudflare");
+    const argv = fs.readFileSync(argvLog, "utf8").split("\n");
+    const config = argv[argv.indexOf("-c") + 1]!;
+    // Wrangler resolves `main` against the config file's directory, so
+    // the generated copy must live beside apps/station/wrangler.jsonc.
+    expect(config).toBe(path.join("apps", "station", "wrangler.deploy.jsonc"));
+    const repo = path.resolve(path.dirname(STATION), "..");
+    expect(fs.existsSync(path.join(repo, config))).toBe(false); // removed after deploy
+    expect(argv).toContain("--domains");
+    expect(argv).toContain("station.example");
   }, TEST_TIMEOUT);
 });
 

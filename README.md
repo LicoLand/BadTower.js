@@ -39,8 +39,9 @@ Or deploy with the button:
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/LicoLand/BadTower.js)
 
-The button flow requires the `BADTOWER_STATION_KEY` secret (a 32-byte
-base64url string — generate one with `station init`).
+The button flow requires both `BADTOWER_STATION_KEY` and
+`BADTOWER_METRICS_KEY` secrets (each a 32-byte base64url string —
+`station init` generates both).
 
 Or run it self-hosted in the container: see `docs/OPERATIONS.md`.
 

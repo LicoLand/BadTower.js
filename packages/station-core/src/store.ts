@@ -14,10 +14,13 @@
  * packet insert, so a settled sequence can never name a newer packet.
  *
  * The first binding records which transport bound the mailbox
- * (`binding.via`). Recipient operations through a native surface are
- * admitted only for natively bound mailboxes — a listener-bound
- * mailbox's packets belong to the listener's proven owner, not to
- * whoever happens to hold a copied admission credential.
+ * (`binding.via`). Recipient operations are admitted only through the
+ * recorded transport — a listener-bound mailbox's packets belong to
+ * the listener's proven owner, not to whoever happens to hold a copied
+ * admission credential, and a natively bound mailbox is equally closed
+ * to listener sessions. A mailbox bound before records existed carries
+ * no transport: it accepts no submissions and admits no recipient
+ * operation until a verified re-bind on either surface records one.
  *
  * The store owns only SQLite semantics — connections, listeners and
  * frame grammars belong to whoever composes it.
@@ -27,6 +30,15 @@ import { fromSqliteBlob } from "./encoding";
 export const SUBJECT_BYTES = 32;
 export const IN_FLIGHT_WINDOW = 16;
 export const MAX_PACKET_BYTES = 524288;
+
+/**
+ * First sequence the durable allocator may issue. Sequences below this
+ * mark are the pre-allocator epoch: every sequence a mailbox bound
+ * before the allocator existed could have issued stays under it (2^48
+ * packets is beyond any live object's cumulative write history), so a
+ * delayed or retried legacy settle can never name a newer packet.
+ */
+export const SEQUENCE_FLOOR = 281_474_976_710_656;
 
 /**
  * The transport a mailbox was first bound through: the station's own
@@ -67,6 +79,27 @@ function owned(bytes: Uint8Array): ArrayBuffer {
 }
 
 /**
+ * Constant-time equality over equal-length inputs: workerd's
+ * `subtle.timingSafeEqual` where the platform offers it, a constant-
+ * work byte loop elsewhere (plain Node has no such primitive).
+ */
+function equalBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual?(x: BufferSource, y: BufferSource): boolean;
+  };
+  if (typeof subtle.timingSafeEqual === "function") {
+    return subtle.timingSafeEqual(
+      new Uint8Array(a).buffer as ArrayBuffer,
+      new Uint8Array(b).buffer as ArrayBuffer,
+    );
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a[i]! ^ b[i]!;
+  return diff === 0;
+}
+
+/**
  * Whether a storage error is the platform's storage-full condition.
  * workerd reports it as an Error whose message names SQLITE_FULL; the
  * check is deliberately loose so a wording change still fails closed.
@@ -83,6 +116,7 @@ export function isStorageFull(error: unknown): boolean {
 
 export class MailboxStore {
   private meta: Meta | null = null;
+  private via: BindingVia | null | undefined = undefined;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -165,17 +199,20 @@ export class MailboxStore {
    */
   boundVia(): BindingVia | null {
     if (!this.bound()) return null;
+    if (this.via !== undefined) return this.via;
+    let via: BindingVia | null = null;
     try {
       const rows = this.ctx.storage.sql
         .exec("SELECT via FROM binding WHERE id = 0")
         .toArray();
       this.meter()?.rowsRead("binding", rows.length);
-      const via = (rows[0] as { via: unknown } | undefined)?.via;
-      return via === "native" || via === "listener" ? via : null;
+      const recorded = (rows[0] as { via: unknown } | undefined)?.via;
+      via = recorded === "native" || recorded === "listener" ? recorded : null;
     } catch {
       // Bound before binding records existed: unknown, not native.
-      return null;
     }
+    this.via = via;
+    return via;
   }
 
   /**
@@ -205,17 +242,22 @@ export class MailboxStore {
       });
       this.meter()?.rowsWritten("reserve", 2);
       this.meta = { subject: subject.slice(), revoked: false };
+      this.via = via;
       this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
       return "bound";
     }
-    if (
-      meta.subject.length !== subject.length ||
-      !crypto.subtle.timingSafeEqual(
-        new Uint8Array(meta.subject).buffer as ArrayBuffer,
-        new Uint8Array(subject).buffer as ArrayBuffer,
-      )
-    ) {
+    if (!equalBytes(meta.subject, subject)) {
       return "subject-mismatch";
+    }
+    // A mailbox bound before binding records existed has no durable
+    // transport yet: the first verified re-bind through either surface
+    // records it and keeps the queued packets. A present record is
+    // never rewritten, so re-reserving cannot retarget a mailbox.
+    if (this.boundVia() === null) {
+      this.createSchema();
+      this.ctx.storage.sql.exec("INSERT INTO binding(id, via) VALUES(0, ?)", via);
+      this.meter()?.rowsWritten("reserve", 1);
+      this.via = via;
     }
     return "bound";
   }
@@ -234,14 +276,18 @@ export class MailboxStore {
    * either path.
    *
    * The sequence is allocated inside the same transaction from a
-   * durable allocator row, seeded from the live maximum on first use,
-   * so a delayed or retried settle can never remove a newer packet
-   * under a reused sequence. A rolled-back attempt leaves the
-   * allocator untouched: the sequence was never assigned.
+   * durable allocator row. On first use the row is seeded at
+   * SEQUENCE_FLOOR, above every sequence a mailbox bound before the
+   * allocator existed could have issued, so a delayed or retried
+   * legacy settle can never remove a newer packet under a reused
+   * sequence. A rolled-back attempt leaves the allocator untouched:
+   * the sequence was never assigned.
    */
   submit(handle: Uint8Array, body: Uint8Array): SubmitResult {
     const meta = this.loadMeta();
-    if (meta.subject === null || meta.revoked) {
+    if (meta.subject === null || meta.revoked || this.boundVia() === null) {
+      // Unrecorded transport cannot receive through either surface;
+      // the answer is the same shape as unbound or revoked.
       return { outcome: "rejected", reason: "target-unavailable" };
     }
     const sql = this.ctx.storage.sql;
@@ -258,13 +304,12 @@ export class MailboxStore {
           .toArray()[0] as { next: number } | undefined;
         let seeded = 0;
         if (row === undefined) {
-          sql.exec(
-            "INSERT INTO alloc(id, next) SELECT 0, COALESCE(MAX(seq), 0) + 1 FROM packet",
-          );
+          const live = (sql
+            .exec("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM packet")
+            .toArray()[0] as { next: number }).next;
+          row = { next: Math.max(live, SEQUENCE_FLOOR) };
+          sql.exec("INSERT INTO alloc(id, next) VALUES(0, ?)", row.next);
           seeded = 1;
-          row = sql
-            .exec("SELECT next FROM alloc WHERE id = 0")
-            .toArray()[0] as { next: number };
         }
         sql.exec("UPDATE alloc SET next = ? WHERE id = 0", row.next + 1);
         sql.exec(
@@ -342,6 +387,25 @@ export class MailboxStore {
   }
 
   /**
+   * The listener's half of the same scope: recipient operations are
+   * admitted only while the recorded binding is a compatibility
+   * listener's. A natively bound mailbox is as closed to the listener
+   * as a listener-bound one is to native claim — and an unrecorded
+   * binding is closed to both.
+   */
+  listenerClaim(excludeSequences: number[], limit: number): Packet[] | null {
+    return this.boundVia() === "listener" ? this.claim(excludeSequences, limit) : null;
+  }
+
+  listenerSettle(sequences: number[]): boolean {
+    return this.boundVia() === "listener" ? this.settle(sequences) : false;
+  }
+
+  listenerHasPending(): boolean {
+    return this.boundVia() === "listener" && this.hasPending();
+  }
+
+  /**
    * Settle stored packets by sequence; unknown sequences settle
    * vacuously. Returns false while the mailbox is unbound or revoked.
    */
@@ -387,6 +451,7 @@ export class MailboxStore {
     this.createSchema();
     this.ctx.storage.sql.exec("INSERT INTO meta(id, subject, revoked) VALUES(0, NULL, 1)");
     this.meta = { subject: null, revoked: true };
+    this.via = undefined;
     this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
   }
 

@@ -6,7 +6,7 @@
  * SQLITE_FULL. Run under the plain node project — no workerd needed.
  */
 import { describe, expect, it } from "vitest";
-import { MailboxStore, isStorageFull } from "@badtower/station-core";
+import { MailboxStore, SEQUENCE_FLOOR, isStorageFull } from "@badtower/station-core";
 
 const D0 = 12_288;
 const PAGE = 4_096;
@@ -93,8 +93,12 @@ class FakeSql {
     }
     if (sql.startsWith("INSERT INTO alloc")) {
       this.require("alloc");
-      this.allocNext = Math.max(0, ...this.packets.keys()) + 1;
+      this.allocNext = params[0] as number;
       return { toArray: () => [] };
+    }
+    if (sql === "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM packet") {
+      this.require("packet");
+      return { toArray: () => [{ next: Math.max(0, ...this.packets.keys()) + 1 }] };
     }
     if (sql.startsWith("UPDATE alloc SET next = ?")) {
       this.require("alloc");
@@ -240,17 +244,78 @@ describe("binding-scoped recipient operations", () => {
     expect(store.nativeCapacityInfo().bound).toBe(true);
   });
 
-  it("treats a bound mailbox with no binding record as unknown, never native", () => {
+  it("refuses submissions and recipient operations until a verified re-bind records the transport", () => {
     const { sql, store } = fixture(1_000_000_000);
-    // A mailbox bound before binding records existed: meta row only.
+    // A mailbox bound before binding records existed: meta and packet
+    // rows only, no binding record.
+    sql.tables.add("meta");
+    sql.tables.add("packet");
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    sql.packets.set(3, { handle: handle().buffer as ArrayBuffer, body: bytes(4).buffer as ArrayBuffer });
+    expect(store.boundVia()).toBeNull();
+    // Recipient operations answer as unbound on BOTH surfaces, and new
+    // submissions are refused: the mailbox cannot receive.
+    expect(store.nativeClaim([], 16)).toBeNull();
+    expect(store.nativeSettle([3])).toBe(false);
+    expect(store.nativeCapacityInfo().bound).toBe(false);
+    expect(store.listenerClaim([], 16)).toBeNull();
+    expect(store.listenerSettle([3])).toBe(false);
+    expect(store.listenerHasPending()).toBe(false);
+    expect(store.submit(handle(), bytes(8)))
+      .toEqual({ outcome: "rejected", reason: "target-unavailable" });
+    // A wrong-subject reserve cannot transition the mailbox.
+    expect(store.reserve(new Uint8Array(32).fill(9), live(), "native"))
+      .toBe("subject-mismatch");
+    expect(store.boundVia()).toBeNull();
+    // The operator-controlled transition: a verified re-bind through
+    // the native surface records the transport and preserves the
+    // already-queued packet.
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+    const claimed = store.nativeClaim([], 16)!;
+    expect(claimed.map((p) => p.sequence)).toEqual([3]);
+    expect(store.nativeSettle([3])).toBe(true);
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+  });
+
+  it("records the listener transport when a listener session re-binds an unrecorded mailbox", () => {
+    const { sql, store } = fixture(1_000_000_000);
     sql.tables.add("meta");
     sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
-    expect(store.boundVia()).toBeNull();
+    expect(store.reserve(subject(), live(), "listener")).toBe("bound");
+    expect(store.boundVia()).toBe("listener");
+    // The listener surface then owns recipient access; native is closed.
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
     expect(store.nativeClaim([], 16)).toBeNull();
+    expect(store.listenerClaim([], 16)).toHaveLength(1);
+  });
+
+  it("admits listener recipient operations only on a listener-bound mailbox", () => {
+    const { store } = fixture(1_000_000_000);
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+    expect(store.listenerClaim([], 16)).toBeNull();
+    expect(store.listenerSettle([1])).toBe(false);
+    expect(store.listenerHasPending()).toBe(false);
+    expect(store.nativeClaim([], 16)).toHaveLength(1);
   });
 });
 
 describe("sequence allocation", () => {
+  it("seeds a drained legacy queue above the pre-allocator epoch", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // A legacy mailbox that queued and settled packets before the
+    // allocator existed: its live maximum is gone with the settled rows,
+    // so seeding must come from the epoch floor, not the queue.
+    sql.tables.add("meta");
+    sql.tables.add("packet");
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+    const first = store.claim([], 16)!;
+    expect(first[0]!.sequence).toBe(SEQUENCE_FLOOR);
+  });
+
   it("never reuses a settled sequence for a newer packet", () => {
     const { store } = fixture(1_000_000_000);
     store.reserve(subject(), live(), "native");

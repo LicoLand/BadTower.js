@@ -37,6 +37,7 @@ export {
   isStorageFull,
   MAX_PACKET_BYTES,
   MailboxStore,
+  SEQUENCE_FLOOR,
   SUBJECT_BYTES,
 } from "./store";
 export type {

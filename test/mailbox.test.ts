@@ -325,19 +325,19 @@ describe("delivery", () => {
       }
     }
     const again = await ready(invite(mailboxId), owner.dev);
-    let inFlight = 0;
+    const delivered: number[] = [];
     for (let i = 0; i < 16; i += 1) {
       const deliver = await takeMatching(again.conn.events, isDeliver);
       if (deliver.type !== "frame" || deliver.data.kind !== "deliver") throw new Error(`deliver ${i} missing`);
-      inFlight += 1;
+      delivered.push(deliver.data.sequence);
     }
-    expect(inFlight).toBe(16);
+    expect(delivered).toHaveLength(16);
     const extra = await Promise.race([
       again.conn.events.take().then((m) => m.type === "frame" && m.data.kind === "deliver" ? "delivered" : "other"),
       new Promise((r) => setTimeout(() => r("none"), 1500)),
     ]);
     expect(extra).not.toBe("delivered");
-    for (let i = 0; i < 16; i += 1) again.conn.ws.send(ackFrame(i + 1));
+    for (const seq of delivered) again.conn.ws.send(ackFrame(seq));
     for (let i = 0; i < 4; i += 1) {
       const deliver = await takeMatching(again.conn.events, isDeliver);
       if (deliver.type !== "frame" || deliver.data.kind !== "deliver") throw new Error(`release ${i} missing`);
@@ -440,6 +440,100 @@ describe("targeting", () => {
         .toArray();
       expect(tables).toEqual([]);
     });
+    sender.conn.ws.close();
+  });
+});
+
+describe("binding transport scope", () => {
+  it("refuses the listener bind on a natively bound mailbox while native access stays open", async () => {
+    const mailboxId = randomBytes(16);
+    const dev = device();
+    const reserve = await SELF.fetch("https://station.test/v1/native/reserve", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", Authorization: `Bearer ${invite(mailboxId)}` },
+      body: dev.pub,
+    });
+    expect(reserve.status).toBe(200);
+    // HELLO proves the same subject, but the recorded transport is
+    // native: the session answers as it does for any refused bind.
+    const conn = (await connect(invite(mailboxId))) as LiveConn;
+    const challenge = await conn.events.take();
+    if (challenge.type !== "frame" || challenge.data.kind !== "challenge") throw new Error("no challenge");
+    conn.ws.send(helloFrame(dev.pub, new Uint8Array(dev.hello(challenge.data.nonce))));
+    expect(await conn.events.take()).toEqual({ type: "close", code: 1008 });
+    // The bound owner's own transport stays open.
+    const claim = await SELF.fetch("https://station.test/v1/native/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", Authorization: `Bearer ${invite(mailboxId)}` },
+      body: new Uint8Array([16, 0]),
+    });
+    expect(claim.status).toBe(200);
+  });
+
+  it("restores an unrecorded mailbox only through a verified re-bind, preserving queued packets", async () => {
+    const mailboxId = randomBytes(16);
+    const dev = device();
+    const stub = env.MAILBOX.getByName(Buffer.from(mailboxId).toString("hex"));
+    // A mailbox bound before binding records existed: meta and packet
+    // rows only, so no durable transport is recorded.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), subject BLOB, revoked INTEGER NOT NULL DEFAULT 0)",
+      );
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS packet(seq INTEGER PRIMARY KEY, handle BLOB NOT NULL, body BLOB NOT NULL)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
+        new Uint8Array(dev.pub).buffer,
+      );
+      state.storage.sql.exec(
+        "INSERT INTO packet(seq, handle, body) VALUES(?, ?, ?)",
+        5,
+        new Uint8Array(handleFor(mailboxId)).buffer,
+        new Uint8Array(randomBytes(8)).buffer,
+      );
+    });
+    // New submissions are refused while no transport is recorded: the
+    // mailbox cannot receive through either surface.
+    const sender = await ready(invite(randomBytes(16)));
+    sender.conn.ws.send(sendFrame(1, handleFor(mailboxId), randomBytes(8)));
+    const refused = await takeMatching(sender.conn.events, isResult);
+    if (refused.type !== "frame" || refused.data.kind !== "result") throw new Error("no result");
+    expect(refused.data.outcome).toBe(1);
+    expect(refused.data.failureClass).toBe(1);
+    // A different device cannot claim ownership of it.
+    const intruder = (await connect(invite(mailboxId))) as LiveConn;
+    const challenge = await intruder.events.take();
+    if (challenge.type !== "frame" || challenge.data.kind !== "challenge") throw new Error("no challenge");
+    const other = device();
+    intruder.ws.send(helloFrame(other.pub, new Uint8Array(other.hello(challenge.data.nonce))));
+    expect(await intruder.events.take()).toEqual({ type: "close", code: 4003 });
+    // The verified re-bind records the listener transport and the
+    // queued packet survives the transition.
+    const owner = await ready(invite(mailboxId), dev);
+    const deliver = await takeMatching(owner.conn.events, isDeliver);
+    if (deliver.type !== "frame" || deliver.data.kind !== "deliver") throw new Error("queued packet lost");
+    expect(deliver.data.sequence).toBe(5);
+    owner.conn.ws.close();
+    sender.conn.ws.close();
+  });
+
+  it("ignores an ACK for a sequence the connection never delivered", async () => {
+    const mailboxId = randomBytes(16);
+    const receiver = await ready(invite(mailboxId));
+    const sender = await ready(invite(randomBytes(16)));
+    sender.conn.ws.send(sendFrame(1, handleFor(mailboxId), randomBytes(8)));
+    await takeMatching(sender.conn.events, isResult);
+    const deliver = await takeMatching(receiver.conn.events, isDeliver);
+    if (deliver.type !== "frame" || deliver.data.kind !== "deliver") throw new Error("no deliver");
+    // A stale, duplicated or forged ACK outside the in-flight set is
+    // ignored: it settles nothing and does not free window room.
+    receiver.conn.ws.send(ackFrame(deliver.data.sequence + 1));
+    receiver.conn.ws.send(ackFrame(deliver.data.sequence));
+    const drained = await takeMatching(receiver.conn.events, isDrained);
+    expect(drained.type).toBe("frame");
+    receiver.conn.ws.close();
     sender.conn.ws.close();
   });
 });

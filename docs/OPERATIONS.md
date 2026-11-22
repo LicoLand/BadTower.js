@@ -49,10 +49,11 @@ npm run station -- cloudflare-deploy --dir ~/private/badtower [--domain NAME]
 ```
 
 Deploys with `wrangler deploy --secrets-file .dev.vars` (uploads
-`BADTOWER_STATION_KEY` from the file, never argv). `--domain` writes a
-temporary `wrangler.deploy.jsonc` with `workers_dev` disabled, deploys it
-with `--domains NAME`, then deletes it. Uses the operator's existing
-wrangler login.
+`BADTOWER_STATION_KEY` and `BADTOWER_METRICS_KEY` from the file, never
+argv). `--domain` writes a temporary `wrangler.deploy.jsonc` beside the
+original — `main` is relative to the config file — with `workers_dev`
+disabled, deploys it with `--domains NAME`, then deletes it. Uses the
+operator's existing wrangler login.
 
 ## Self-hosted deploy
 
@@ -82,6 +83,16 @@ Both live in `apps/station/wrangler.jsonc` `vars` (and `.dev.vars` for
 `wrangler dev`). The values trace to the official inputs table in
 `COST.md`; change the plan there first when Cloudflare moves a limit.
 
+## Mailboxes bound before transport records
+
+Mailboxes bound before the `binding` table existed carry no recorded
+transport: submissions and recipient operations on either surface are
+refused until the bound owner re-verifies — re-POST the stored subject
+to `/v1/native/reserve` for a natively bound mailbox, or reconnect and
+HELLO with the bound device key for a listener-bound one. The first
+verified re-bind records the transport and preserves the queued
+packets.
+
 ## Health
 
 ```sh
@@ -108,9 +119,13 @@ appears in a command line or process listing. `metrics.key` is a
 separate metrics-only credential (`BADTOWER_METRICS_KEY` in
 `.dev.vars`): it admits this one route and cannot mint, bind, claim
 or revoke, so scraping infrastructure never needs the station key.
-Directories initialized before it existed mint it with
-`npm run station -- metrics-key --dir <dir>` (then deploy the new
-`BADTOWER_METRICS_KEY` line from `.dev.vars` as a secret).
+Directories initialized before it existed align it with
+`npm run station -- metrics-key --dir <dir>`: a valid
+`BADTOWER_METRICS_KEY` already in `.dev.vars` is adopted into
+`metrics.key` — deploy reads that entry, so the CLI and the Worker
+always share the credential — a missing or malformed entry is repaired
+in place, and rerunning the command is safe. Deploy the
+`BADTOWER_METRICS_KEY` line from `.dev.vars` as a secret afterwards.
 
 Values are per-isolate aggregates for reconciliation against
 Cloudflare's own usage record, which remains authoritative (see

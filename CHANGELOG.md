@@ -74,3 +74,28 @@ before the first tagged release; no tag or published artifact is implied.
   credential no longer appears in a command line or process listing.
   `init` mints `metrics.key`; `metrics-key` adds it to directories
   initialized earlier.
+- The binding transport is enforced on the listener too: a mailbox
+  bound natively refuses the listener's READY, recipient operations on
+  both surfaces pass through recorded-transport gates, and a listener
+  ACK settles only a sequence its own connection was delivered — a
+  stale or forged ACK can never delete a packet another session is
+  owed.
+- A mailbox bound before binding records existed refuses new
+  submissions and all recipient operations until a verified re-bind —
+  re-reserving the stored subject natively, or re-HELLOing the bound
+  device key — records the transport, preserving the queued packets.
+- The durable sequence allocator seeds above every sequence a
+  pre-allocator mailbox could have issued, so sequences settled before
+  the allocator existed can never be reissued to newer packets.
+- `station.mjs metrics-key` aligns the credential across `metrics.key`
+  and `.dev.vars` instead of minting a divergent one: a valid existing
+  `.dev.vars` entry is adopted, a missing or malformed one is repaired
+  in place, and the command converges safely on rerun.
+- `station.mjs` resolves every component of a private write
+  destination through links — including dangling ones — so key
+  material cannot be written outside the intended private directory,
+  and every file a command writes is validated, not only its parent.
+- `cloudflare-deploy --domain` writes its temporary Wrangler config
+  beside `apps/station/wrangler.jsonc`, so the config's relative
+  `main` still resolves to `src/worker.ts`; deploy-button and
+  operations documentation now name both required secrets.

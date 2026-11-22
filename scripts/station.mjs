@@ -55,16 +55,23 @@ function fail(message) {
  * The physical path `target` resolves to: the destination may not
  * exist yet, so the deepest existing ancestor is resolved through
  * symlinks and the remainder re-appended. A symlinked ancestor cannot
- * smuggle private material back into the tracked tree.
+ * smuggle private material back into the tracked tree — and a symlink
+ * counts as existing even when its target is missing, so a dangling
+ * link in the write path is refused rather than silently followed.
  */
 function physicalPath(target) {
   let at = target;
   const tail = [];
-  while (!fs.existsSync(at)) {
-    const parent = path.dirname(at);
-    if (parent === at) break;
-    tail.unshift(path.basename(at));
-    at = parent;
+  for (;;) {
+    try {
+      fs.lstatSync(at); // a link is a real component even when dangling
+      break;
+    } catch {
+      const parent = path.dirname(at);
+      if (parent === at) fail(`cannot resolve ${target}: no existing ancestor`);
+      tail.unshift(path.basename(at));
+      at = parent;
+    }
   }
   try {
     return path.join(fs.realpathSync(at), ...tail);
@@ -94,6 +101,21 @@ function privateOutput(file) {
     }
   }
   return resolved;
+}
+
+/**
+ * A file about to receive material inside an already-checked private
+ * directory: its physical destination must still resolve inside that
+ * directory — a dangling link is unresolvable and a link pointing
+ * outside escapes, so both are refused.
+ */
+function privateChild(dir, name) {
+  const file = path.join(dir, name);
+  const relative = path.relative(physicalPath(dir), physicalPath(file));
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`${file} escapes its private directory through a link`);
+  }
+  return file;
 }
 
 function parseArgs(argv) {
@@ -213,25 +235,39 @@ function cmdInvite({ flags }) {
 }
 
 /**
- * Mint the metrics-only credential for a directory initialized before
- * it existed: writes metrics.key (refusing to overwrite) and records
- * BADTOWER_METRICS_KEY in .dev.vars unless already present.
+ * Align the metrics-only credential between metrics.key (the CLI's
+ * in-process read) and .dev.vars (the value deploy uploads). A valid
+ * existing .dev.vars entry is adopted — it is what the Worker already
+ * expects — then an existing metrics.key, and only then a fresh mint.
+ * Both files are always written with the resolved value, so the CLI
+ * and the Worker cannot diverge and an interrupted run converges on
+ * the next invocation.
  */
 function cmdMetricsKey({ flags }) {
   const dir = privateOutput(flags.dir ?? fail("--dir required"));
-  const file = path.join(dir, "metrics.key");
-  if (fs.existsSync(file)) fail(`${file} already exists; refusing to overwrite`);
-  const key = toBase64Url(randomBytes(32));
-  writePrivate(file, `${key}\n`);
-  const varsFile = path.join(dir, ".dev.vars");
-  const line = `BADTOWER_METRICS_KEY=${key}\n`;
-  if (fs.existsSync(varsFile)) {
-    const current = fs.readFileSync(varsFile, "utf8");
-    if (!/^BADTOWER_METRICS_KEY=/m.test(current)) fs.appendFileSync(varsFile, line);
-  } else {
-    writePrivate(varsFile, line);
-  }
-  console.log(`metrics credential written to ${file}`);
+  const keyFile = privateChild(dir, "metrics.key");
+  const varsFile = privateChild(dir, ".dev.vars");
+  const validKey = (text) => {
+    try {
+      return fromBase64Url(text).length === 32;
+    } catch {
+      return false;
+    }
+  };
+  const vars = fs.existsSync(varsFile) ? fs.readFileSync(varsFile, "utf8") : "";
+  // All entries are considered — the first valid one wins — and every
+  // entry is rewritten to the resolved line, so duplicates collapse.
+  const varsValue = [...vars.matchAll(/^BADTOWER_METRICS_KEY=(.*)$/gm)]
+    .map((match) => match[1].trim())
+    .find(validKey) ?? "";
+  const fileValue = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, "utf8").trim() : "";
+  const key = varsValue || (validKey(fileValue) ? fileValue : toBase64Url(randomBytes(32)));
+  const line = `BADTOWER_METRICS_KEY=${key}`;
+  const rest = vars.replace(/^BADTOWER_METRICS_KEY=.*(\n|$)/gm, "");
+  const next = `${rest}${rest === "" || rest.endsWith("\n") ? "" : "\n"}${line}\n`;
+  writePrivate(varsFile, next);
+  writePrivate(keyFile, `${key}\n`);
+  console.log(`metrics credential written to ${keyFile}`);
 }
 
 // IP-literal station hosts bypass the environment proxy; hostname
@@ -337,14 +373,17 @@ function cmdTls({ flags }) {
   } catch {
     fail("openssl is not installed");
   }
-  const tlsDir = path.join(dir, "tls");
+  const tlsDir = privateChild(dir, "tls");
   fs.mkdirSync(tlsDir, { recursive: true, mode: 0o700 });
-  const caKey = path.join(tlsDir, "ca.key");
-  const caCrt = path.join(tlsDir, "ca.crt");
-  const serverKey = path.join(tlsDir, "server.key");
-  const serverCrt = path.join(tlsDir, "server.crt");
-  const serverCsr = path.join(tlsDir, "server.csr");
-  const extFile = path.join(tlsDir, "server.ext");
+  // openssl follows links on every -out path, so each destination is
+  // resolved before it is handed to the child.
+  const caKey = privateChild(tlsDir, "ca.key");
+  const caCrt = privateChild(tlsDir, "ca.crt");
+  const serverKey = privateChild(tlsDir, "server.key");
+  const serverCrt = privateChild(tlsDir, "server.crt");
+  const serverCsr = privateChild(tlsDir, "server.csr");
+  const extFile = privateChild(tlsDir, "server.ext");
+  privateChild(tlsDir, "ca.srl");
   run("openssl", ["ecparam", "-genkey", "-name", "P-256", "-noout", "-out", caKey]);
   run("openssl", ["req", "-x509", "-new", "-key", caKey, "-sha256", "-days", "3650",
     "-subj", "/CN=BadTower Station Private CA", "-out", caCrt]);
@@ -372,15 +411,18 @@ function cmdCloudflareDeploy({ flags }) {
     run("npx", ["wrangler", "deploy", "-c", config, "--secrets-file", varsFile], { cwd: REPO });
   } else {
     const base = fs.readFileSync(path.join(REPO, config), "utf8");
-    const tmp = path.join(REPO, "wrangler.deploy.jsonc");
+    // Kept beside the original: the config's relative `main` resolves
+    // against the file's own directory, so a copy at the repository
+    // root would point Wrangler at a missing entrypoint.
+    const tmp = path.join("apps", "station", "wrangler.deploy.jsonc");
     fs.writeFileSync(
-      tmp,
+      path.join(REPO, tmp),
       base.replace(/"workers_dev": true,/, `"workers_dev": false,`),
     );
     try {
       run("npx", ["wrangler", "deploy", "-c", tmp, "--secrets-file", varsFile, "--domains", flags.domain], { cwd: REPO });
     } finally {
-      fs.rmSync(tmp, { force: true });
+      fs.rmSync(path.join(REPO, tmp), { force: true });
     }
   }
   console.log("deployed to cloudflare");

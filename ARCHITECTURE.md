@@ -52,13 +52,20 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   deletes the row. Unsettled packets replay in sequence order. When
   nothing is stored and nothing is in flight, the listener signals
   drained. Sequences come from a durable, non-reusing allocator bumped
-  inside the packet transaction, so a delayed or retried settle can
-  never remove a newer packet under a reused sequence.
+  inside the packet transaction, starting above every sequence a
+  pre-allocator mailbox could have issued, and the listener settles
+  only sequences it delivered on the live connection — a delayed,
+  retried or forged settle can never remove a newer packet.
 - Recipient operations are scoped to the binding transport: the first
   binding records whether the mailbox bound natively or through a
-  compatibility listener, and a listener-bound mailbox answers 403 to
+  compatibility listener. A listener-bound mailbox answers 403 to
   native claim, settle and capacity — the `btm1` credential alone is
-  not the bound owner. Submit stays open cross-transport.
+  not the bound owner — and a natively bound mailbox refuses the
+  listener's session before READY. A mailbox bound before records
+  existed carries no transport: submissions and recipient operations
+  refuse on both surfaces until a verified re-bind records one,
+  preserving the queued packets. Submit stays open cross-transport
+  for every receivable mailbox.
 - Submit targets any mailbox id (the first 16 handle bytes); the store
   rejects unbound/revoked mailboxes and answers transient mailboxFull
   when the measured `ctx.storage.sql.databaseSize` after the insert
