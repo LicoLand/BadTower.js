@@ -30,7 +30,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.21.2",
-    "@types/node": "26.2.0",
+    "@types/node": "26.6.6",
     "dotenv": "16.3.1",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
