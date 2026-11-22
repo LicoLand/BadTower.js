@@ -216,6 +216,28 @@ describe("station.mjs metrics-key", () => {
     ).toEqual([`BADTOWER_METRICS_KEY=${deployed}`]);
   }, TEST_TIMEOUT);
 
+  it("preserves a trailing empty colon-form setting so it cannot absorb the credential", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    // `OPTIONAL: ` ends the file: its trailing space completes the `:`
+    // separator, giving OPTIONAL an empty value. Rewriting it away
+    // would let the pinned parser read the appended assignment as
+    // that value, and Wrangler would lose the metrics binding.
+    fs.writeFileSync(path.join(dir, ".dev.vars"),
+      `BADTOWER_STATION_KEY=${key}\nOPTIONAL: `, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    const after = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
+    const metricsKey = fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim();
+    expect(Buffer.from(metricsKey, "base64url")).toHaveLength(32);
+    expect(after).toContain("OPTIONAL: \n");
+    const parsed = parseDotenv(after);
+    expect(parsed.BADTOWER_STATION_KEY).toBe(key);
+    expect(parsed.OPTIONAL).toBe("");
+    expect(parsed.BADTOWER_METRICS_KEY).toBe(metricsKey);
+  }, TEST_TIMEOUT);
+
   it("leaves an unrelated multiline value byte-identical while rewriting", async () => {
     const dir = path.join(tempDir(), "station");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

@@ -377,7 +377,13 @@ function cmdMetricsKey({ flags }) {
     .map((entry) => [entry.start, entry.end])
     .sort((a, b) => b[0] - a[0]);
   for (const [start, end] of spans) kept = kept.slice(0, start) + kept.slice(end);
-  kept = kept.replace(/\s+$/, "");
+  // Only surplus trailing newlines are dropped; other trailing
+  // whitespace belongs to the last line. An empty colon-form tail like
+  // `OPTIONAL: ` parses as an empty value BECAUSE that space completes
+  // its `:` separator — stripping it would leave `OPTIONAL:` whose
+  // `:`+newline separator then swallows the appended assignment as
+  // OPTIONAL's value, hiding the metrics binding from Wrangler.
+  kept = kept.replace(/\n+$/, "");
   const next = `${kept}${kept === "" ? "" : "\n"}BADTOWER_METRICS_KEY=${key}\n`;
   writePrivate(varsFile, next);
   writePrivate(keyFile, `${key}\n`);
