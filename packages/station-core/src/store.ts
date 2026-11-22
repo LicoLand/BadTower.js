@@ -14,7 +14,7 @@
  * packet insert, so a settled sequence can never name a newer packet.
  *
  * The first binding records which transport bound the mailbox
- * (`binding.via`). Recipient operations are admitted only through the
+ * (`meta.via`). Recipient operations are admitted only through the
  * recorded transport — a listener-bound mailbox's packets belong to
  * the listener's proven owner, not to whoever happens to hold a copied
  * admission credential, and a natively bound mailbox is equally closed
@@ -71,7 +71,7 @@ export type StoreMeter = {
   observeStorage(bytes: number): void;
 };
 
-type Meta = { subject: Uint8Array | null; revoked: boolean };
+type Meta = { subject: Uint8Array | null; revoked: boolean; via: BindingVia | null };
 
 /** A subarray's .buffer is its parent's — storing it would leak the whole message. */
 function owned(bytes: Uint8Array): ArrayBuffer {
@@ -116,7 +116,7 @@ export function isStorageFull(error: unknown): boolean {
 
 export class MailboxStore {
   private meta: Meta | null = null;
-  private via: BindingVia | null | undefined = undefined;
+  private schemaUpgraded = false;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -130,10 +130,7 @@ export class MailboxStore {
   /** Schema exists only where a mailbox exists: a never-bound object writes nothing. */
   private createSchema(): void {
     this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), subject BLOB, revoked INTEGER NOT NULL DEFAULT 0)",
-    );
-    this.ctx.storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS binding(id INTEGER PRIMARY KEY CHECK(id = 0), via TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), subject BLOB, revoked INTEGER NOT NULL DEFAULT 0, via TEXT)",
     );
     this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS alloc(id INTEGER PRIMARY KEY CHECK(id = 0), next INTEGER NOT NULL)",
@@ -143,23 +140,71 @@ export class MailboxStore {
     );
   }
 
+  /**
+   * Bring a pre-existing schema forward before meta is read. Each step
+   * is idempotent and none allocates a data page — column renames and
+   * additions rewrite the schema record in place — so even a mailbox at
+   * its storage ceiling still upgrades and can re-bind.
+   *
+   *   - the original schema kept the bound owner in meta.device_key;
+   *     renaming it to subject preserves the owner, the revocation
+   *     state and every queued packet;
+   *   - the intermediate schema kept the binding transport in its own
+   *     binding table; it folds into meta.via and the empty table is
+   *     dropped, freeing its page.
+   */
+  private upgradeSchema(): void {
+    if (this.schemaUpgraded) return;
+    this.schemaUpgraded = true;
+    const sql = this.ctx.storage.sql;
+    const hasColumn = (table: string, column: string): boolean => {
+      try {
+        sql.exec(`SELECT ${column} FROM ${table} LIMIT 0`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // No meta table at all: the mailbox never bound — nothing to do.
+    if (!hasColumn("meta", "id")) return;
+    if (!hasColumn("meta", "subject") && hasColumn("meta", "device_key")) {
+      sql.exec("ALTER TABLE meta RENAME COLUMN device_key TO subject");
+    }
+    if (!hasColumn("meta", "via")) {
+      sql.exec("ALTER TABLE meta ADD COLUMN via TEXT");
+    }
+    if (hasColumn("binding", "via")) {
+      const rows = sql.exec("SELECT via FROM binding WHERE id = 0").toArray();
+      this.meter()?.rowsRead("binding", rows.length);
+      const via = (rows[0] as { via: unknown } | undefined)?.via;
+      sql.exec("DROP TABLE binding");
+      if (via === "native" || via === "listener") {
+        sql.exec("UPDATE meta SET via = ? WHERE id = 0 AND via IS NULL", via);
+      }
+    }
+  }
+
   private loadMeta(): Meta {
     if (this.meta !== null) return this.meta;
+    this.upgradeSchema();
     let rows: unknown[] = [];
     try {
       rows = this.ctx.storage.sql
-        .exec("SELECT subject, revoked FROM meta WHERE id = 0")
+        .exec("SELECT subject, revoked, via FROM meta WHERE id = 0")
         .toArray();
     } catch {
       // No meta table is an unbound mailbox, not an error.
     }
     this.meter()?.rowsRead("meta", rows.length);
-    const row = rows[0] as { subject: unknown; revoked: unknown } | undefined;
+    const row = rows[0] as
+      | { subject: unknown; revoked: unknown; via: unknown }
+      | undefined;
     this.meta = row === undefined
-      ? { subject: null, revoked: false }
+      ? { subject: null, revoked: false, via: null }
       : {
           subject: row.subject === null ? null : fromSqliteBlob(row.subject),
           revoked: row.revoked === 1,
+          via: row.via === "native" || row.via === "listener" ? row.via : null,
         };
     return this.meta;
   }
@@ -198,21 +243,8 @@ export class MailboxStore {
    * records, which must not be treated as native.
    */
   boundVia(): BindingVia | null {
-    if (!this.bound()) return null;
-    if (this.via !== undefined) return this.via;
-    let via: BindingVia | null = null;
-    try {
-      const rows = this.ctx.storage.sql
-        .exec("SELECT via FROM binding WHERE id = 0")
-        .toArray();
-      this.meter()?.rowsRead("binding", rows.length);
-      const recorded = (rows[0] as { via: unknown } | undefined)?.via;
-      via = recorded === "native" || recorded === "listener" ? recorded : null;
-    } catch {
-      // Bound before binding records existed: unknown, not native.
-    }
-    this.via = via;
-    return via;
+    const meta = this.loadMeta();
+    return meta.subject === null ? null : meta.via;
   }
 
   /**
@@ -232,32 +264,30 @@ export class MailboxStore {
     if (meta.subject === null) {
       if (Math.floor(Date.now() / 1000) >= notAfterSeconds) return "bind-window-closed";
       this.createSchema();
-      const sql = this.ctx.storage.sql;
-      this.ctx.storage.transactionSync(() => {
-        sql.exec(
-          "INSERT INTO meta(id, subject, revoked) VALUES(0, ?, 0)",
-          owned(subject),
-        );
-        sql.exec("INSERT INTO binding(id, via) VALUES(0, ?)", via);
-      });
-      this.meter()?.rowsWritten("reserve", 2);
-      this.meta = { subject: subject.slice(), revoked: false };
-      this.via = via;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO meta(id, subject, revoked, via) VALUES(0, ?, 0, ?)",
+        owned(subject),
+        via,
+      );
+      this.meter()?.rowsWritten("reserve", 1);
+      this.meta = { subject: subject.slice(), revoked: false, via };
       this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
       return "bound";
     }
     if (!equalBytes(meta.subject, subject)) {
       return "subject-mismatch";
     }
-    // A mailbox bound before binding records existed has no durable
+    // A mailbox bound before transport records existed has no durable
     // transport yet: the first verified re-bind through either surface
-    // records it and keeps the queued packets. A present record is
-    // never rewritten, so re-reserving cannot retarget a mailbox.
-    if (this.boundVia() === null) {
-      this.createSchema();
-      this.ctx.storage.sql.exec("INSERT INTO binding(id, via) VALUES(0, ?)", via);
+    // records it and keeps the queued packets. The record lives in the
+    // meta row itself, so the update writes in place — it needs no new
+    // page and still lands on a mailbox at its storage ceiling. A
+    // present record is never rewritten, so re-reserving cannot
+    // retarget a mailbox.
+    if (meta.via === null) {
+      this.ctx.storage.sql.exec("UPDATE meta SET via = ? WHERE id = 0", via);
       this.meter()?.rowsWritten("reserve", 1);
-      this.via = via;
+      this.meta = { ...meta, via };
     }
     return "bound";
   }
@@ -299,28 +329,35 @@ export class MailboxStore {
         sql.exec(
           "CREATE TABLE IF NOT EXISTS alloc(id INTEGER PRIMARY KEY CHECK(id = 0), next INTEGER NOT NULL)",
         );
-        let row = sql
+        const row = sql
           .exec("SELECT next FROM alloc WHERE id = 0")
           .toArray()[0] as { next: number } | undefined;
         let seeded = 0;
+        let issued: number;
         if (row === undefined) {
           const live = (sql
             .exec("SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM packet")
             .toArray()[0] as { next: number }).next;
-          row = { next: Math.max(live, SEQUENCE_FLOOR) };
-          sql.exec("INSERT INTO alloc(id, next) VALUES(0, ?)", row.next);
+          issued = Math.max(live, SEQUENCE_FLOOR);
+          sql.exec("INSERT INTO alloc(id, next) VALUES(0, ?)", issued + 1);
           seeded = 1;
+        } else {
+          // A counter persisted below the floor predates the floor
+          // itself: raise it inside this transaction so the issued
+          // sequence — and every later one — stays above the
+          // pre-allocator epoch.
+          issued = Math.max(row.next, SEQUENCE_FLOOR);
+          sql.exec("UPDATE alloc SET next = ? WHERE id = 0", issued + 1);
         }
-        sql.exec("UPDATE alloc SET next = ? WHERE id = 0", row.next + 1);
         sql.exec(
           "INSERT INTO packet(seq, handle, body) VALUES(?, ?, ?)",
-          row.next,
+          issued,
           owned(handle),
           owned(body),
         );
         if (sql.databaseSize > this.capacityBytes()) throw new CapacityExceeded();
         this.meter()?.rowsRead("alloc", 1 + seeded);
-        this.meter()?.rowsWritten("alloc", seeded + 1);
+        this.meter()?.rowsWritten("alloc", 1);
         this.meter()?.rowsWritten("submit", 1);
         this.meter()?.observeStorage(sql.databaseSize);
         return { outcome: "accepted" };
@@ -450,8 +487,7 @@ export class MailboxStore {
     // deleteAll drops the tables too; the tombstone needs meta back.
     this.createSchema();
     this.ctx.storage.sql.exec("INSERT INTO meta(id, subject, revoked) VALUES(0, NULL, 1)");
-    this.meta = { subject: null, revoked: true };
-    this.via = undefined;
+    this.meta = { subject: null, revoked: true, via: null };
     this.meter()?.observeStorage(this.ctx.storage.sql.databaseSize);
   }
 

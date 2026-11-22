@@ -163,6 +163,43 @@ describe("station.mjs metrics-key", () => {
       .toContain(`BADTOWER_METRICS_KEY=${half}`);
     expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(half);
   }, TEST_TIMEOUT);
+
+  it("adopts the value Wrangler would: quoted forms and last-wins duplicates", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    const stale = Buffer.from(randomBytes(32)).toString("base64url");
+    const deployed = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    // Wrangler accepts quoted values and lets the last duplicate win —
+    // adopting the first literal entry would rotate the CLI onto a
+    // credential the deployed Worker no longer uses.
+    fs.writeFileSync(path.join(dir, ".dev.vars"),
+      `BADTOWER_STATION_KEY=${key}\n` +
+        `BADTOWER_METRICS_KEY=${stale}\n` +
+        `# rotated below\n` +
+        `BADTOWER_METRICS_KEY="${deployed}"\n`,
+      { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(deployed);
+    const lines = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8").split("\n")
+      .filter((line) => line.includes("BADTOWER_METRICS_KEY"));
+    expect(lines).toEqual([`BADTOWER_METRICS_KEY=${deployed}`]);
+  }, TEST_TIMEOUT);
+
+  it("refuses aliased credential destinations before writing either file", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, ".dev.vars"), `BADTOWER_STATION_KEY=${key}\n`, { mode: 0o600 });
+    // metrics.key resolves to .dev.vars itself: writing it last would
+    // erase the station credential the file also carries.
+    fs.symlinkSync(path.join(dir, ".dev.vars"), path.join(dir, "metrics.key"));
+    await expectRefusal(["metrics-key", "--dir", dir], /station: .*same file/);
+    expect(fs.readFileSync(path.join(dir, ".dev.vars"), "utf8"))
+      .toBe(`BADTOWER_STATION_KEY=${key}\n`);
+  }, TEST_TIMEOUT);
 });
 
 describe("station.mjs invite", () => {
@@ -249,6 +286,26 @@ describe("station.mjs private output boundary", () => {
     await expectRefusal(["metrics-key", "--dir", dir], /station: cannot resolve/);
   }, TEST_TIMEOUT);
 
+  it("refuses an in-repository path that merely begins with two dots", async () => {
+    // `..fixture` is a name inside the checkout, not a parent-directory
+    // component: it must not be mistaken for an escape and waived.
+    const dotDir = path.join(repo, "..fixture-station-test");
+    await expectRefusal(["init", "--dir", dotDir], /station: .*is inside the repository/);
+    expect(fs.existsSync(dotDir)).toBe(false);
+    // The same destination reached through a symlink resolves inside
+    // the repository as well and is refused just the same.
+    fs.mkdirSync(dotDir);
+    const link = path.join(tempDir(), "link");
+    fs.symlinkSync(dotDir, link);
+    try {
+      await expectRefusal(["init", "--dir", path.join(link, "station")], /station: .*is inside the repository/);
+      expect(fs.readdirSync(dotDir)).toEqual([]);
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmdirSync(dotDir);
+    }
+  }, TEST_TIMEOUT);
+
   it("refuses a child write that escapes its private directory through a link", async () => {
     const dir = path.join(tempDir(), "station");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -267,6 +324,16 @@ describe("station.mjs private output boundary", () => {
 });
 
 describe("station.mjs cloudflare-deploy", () => {
+  const stubNpx = (script: string): string => {
+    const binDir = tempDir();
+    fs.writeFileSync(path.join(binDir, "npx"), script, { mode: 0o755 });
+    return `${binDir}${path.delimiter}${process.env.PATH}`;
+  };
+  const repo = path.resolve(path.dirname(STATION), "..");
+  const deployConfigs = () =>
+    fs.readdirSync(path.join(repo, "apps", "station"))
+      .filter((name) => name.startsWith("wrangler.deploy-"));
+
   it("keeps the generated config beside the original so its relative main resolves", async () => {
     const dir = path.join(tempDir(), "station");
     await run(["init", "--dir", dir]);
@@ -286,12 +353,27 @@ describe("station.mjs cloudflare-deploy", () => {
     const argv = fs.readFileSync(argvLog, "utf8").split("\n");
     const config = argv[argv.indexOf("-c") + 1]!;
     // Wrangler resolves `main` against the config file's directory, so
-    // the generated copy must live beside apps/station/wrangler.jsonc.
-    expect(config).toBe(path.join("apps", "station", "wrangler.deploy.jsonc"));
-    const repo = path.resolve(path.dirname(STATION), "..");
+    // the generated copy must live beside apps/station/wrangler.jsonc —
+    // under a unique name, so concurrent deploys cannot clobber it.
+    expect(config).toMatch(/^apps.station.wrangler\.deploy-\d+\.jsonc$/);
     expect(fs.existsSync(path.join(repo, config))).toBe(false); // removed after deploy
     expect(argv).toContain("--domains");
     expect(argv).toContain("station.example");
+  }, TEST_TIMEOUT);
+
+  it("removes the generated config when the Wrangler child fails", async () => {
+    const dir = path.join(tempDir(), "station");
+    await run(["init", "--dir", dir]);
+    // A stub npx that fails the way a rejected deploy does: the command
+    // exits nonzero, but only after the temporary config is gone.
+    const r = await spawnCmd(
+      "node",
+      [STATION, "cloudflare-deploy", "--dir", dir, "--domain", "station.example"],
+      { PATH: stubNpx("#!/bin/sh\nexit 1\n") },
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/station: npx exited 1/);
+    expect(deployConfigs()).toEqual([]);
   }, TEST_TIMEOUT);
 });
 

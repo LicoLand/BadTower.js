@@ -81,6 +81,19 @@ function physicalPath(target) {
 }
 
 /**
+ * Whether a path.relative result means the candidate leaves `root`.
+ * Only an actual `..` path component escapes — a name that merely
+ * begins with two dots (`..fixture`) is still inside.
+ */
+function escapes(relative) {
+  return (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
+}
+
+/**
  * Private material must never land at an arbitrary repository-relative
  * path: anything inside the repository — lexically or through a
  * symlinked ancestor — that is not under an ignore-covered private
@@ -93,7 +106,7 @@ function privateOutput(file) {
     [physicalPath(resolved), REPO_REAL],
   ]) {
     const relative = path.relative(root, candidate);
-    if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+    if (!escapes(relative)) {
       const first = relative.split(path.sep)[0];
       if (!REPO_PRIVATE_DIRS.includes(first)) {
         fail(`${file} is inside the repository; private material goes under ${REPO_PRIVATE_DIRS.join("/ or ")}/ or outside the tree`);
@@ -112,7 +125,7 @@ function privateOutput(file) {
 function privateChild(dir, name) {
   const file = path.join(dir, name);
   const relative = path.relative(physicalPath(dir), physicalPath(file));
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (escapes(relative)) {
     fail(`${file} escapes its private directory through a link`);
   }
   return file;
@@ -154,12 +167,26 @@ function hmac(key, ...parts) {
 }
 
 function writePrivate(file, content, mode = 0o600) {
-  fs.writeFileSync(file, content, { mode });
-  fs.chmodSync(file, mode); // mode alone only applies to newly created files
+  // Temp-then-rename inside the same directory: an interrupted write
+  // leaves the old contents or the new ones, never a truncated file —
+  // and rename replaces a destination symlink rather than following it.
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, content, { mode });
+    fs.chmodSync(tmp, mode); // the create mode is still filtered by umask
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    fs.rmSync(tmp, { force: true });
+    throw error;
+  }
+}
+
+function attempt(file, args, options = {}) {
+  return spawnSync(file, args, { stdio: ["pipe", "pipe", "inherit"], ...options });
 }
 
 function run(file, args, options = {}) {
-  const result = spawnSync(file, args, { stdio: ["pipe", "pipe", "inherit"], ...options });
+  const result = attempt(file, args, options);
   if (result.error) fail(`${file}: ${result.error.message}`);
   if (result.status !== 0) fail(`${file} exited ${result.status}`);
   return result.stdout;
@@ -235,36 +262,87 @@ function cmdInvite({ flags }) {
 }
 
 /**
+ * The effective value a dotenv file assigns `name`, parsed the way
+ * Wrangler reads .dev.vars: optional `export`, whitespace around `=`,
+ * single- or double-quoted values, comments and blank lines skipped,
+ * and the LAST assignment wins for duplicate keys. Anything else —
+ * first-match or literal-only parsing — can pick a shadowed stale
+ * entry and diverge the CLI credential from the deployed one.
+ */
+function devVarsValue(text, name) {
+  let value;
+  const assignment = new RegExp(`^(?:export\\s+)?${name}\\s*=\\s*(.*)$`);
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const match = assignment.exec(line);
+    if (match === null) continue;
+    let raw = match[1].trim();
+    const quote = raw[0];
+    if (
+      raw.length >= 2 &&
+      (quote === '"' || quote === "'" || quote === "`") &&
+      raw.endsWith(quote)
+    ) {
+      raw = raw.slice(1, -1);
+    }
+    value = raw;
+  }
+  return value;
+}
+
+/** Whether a .dev.vars line assigns `name`, whatever its syntax. */
+function assignsVar(rawLine, name) {
+  const line = rawLine.trim();
+  return (
+    line !== "" &&
+    !line.startsWith("#") &&
+    new RegExp(`^(?:export\\s+)?${name}\\s*=`).test(line)
+  );
+}
+
+/**
  * Align the metrics-only credential between metrics.key (the CLI's
  * in-process read) and .dev.vars (the value deploy uploads). A valid
- * existing .dev.vars entry is adopted — it is what the Worker already
- * expects — then an existing metrics.key, and only then a fresh mint.
- * Both files are always written with the resolved value, so the CLI
- * and the Worker cannot diverge and an interrupted run converges on
- * the next invocation.
+ * effective .dev.vars entry — resolved with Wrangler's own parsing and
+ * precedence — is adopted, since it is what the deployed Worker
+ * already expects; then an existing metrics.key, and only then a
+ * fresh mint. Both files are always written with the resolved value,
+ * so the CLI and the Worker cannot diverge and an interrupted run
+ * converges on the next invocation.
  */
 function cmdMetricsKey({ flags }) {
   const dir = privateOutput(flags.dir ?? fail("--dir required"));
   const keyFile = privateChild(dir, "metrics.key");
   const varsFile = privateChild(dir, ".dev.vars");
+  // The two destinations must be distinct files: an alias would let
+  // one write erase the other's contents mid-command.
+  if (physicalPath(keyFile) === physicalPath(varsFile)) {
+    fail("metrics.key and .dev.vars resolve to the same file");
+  }
   const validKey = (text) => {
     try {
-      return fromBase64Url(text).length === 32;
+      return text !== undefined && fromBase64Url(text).length === 32;
     } catch {
       return false;
     }
   };
   const vars = fs.existsSync(varsFile) ? fs.readFileSync(varsFile, "utf8") : "";
-  // All entries are considered — the first valid one wins — and every
-  // entry is rewritten to the resolved line, so duplicates collapse.
-  const varsValue = [...vars.matchAll(/^BADTOWER_METRICS_KEY=(.*)$/gm)]
-    .map((match) => match[1].trim())
-    .find(validKey) ?? "";
+  // The value deploy actually uploads is the effective one — every
+  // assignment considered under Wrangler's last-wins precedence.
+  const varsValue = devVarsValue(vars, "BADTOWER_METRICS_KEY");
   const fileValue = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, "utf8").trim() : "";
-  const key = varsValue || (validKey(fileValue) ? fileValue : toBase64Url(randomBytes(32)));
-  const line = `BADTOWER_METRICS_KEY=${key}`;
-  const rest = vars.replace(/^BADTOWER_METRICS_KEY=.*(\n|$)/gm, "");
-  const next = `${rest}${rest === "" || rest.endsWith("\n") ? "" : "\n"}${line}\n`;
+  const key = validKey(varsValue)
+    ? varsValue
+    : validKey(fileValue)
+      ? fileValue
+      : toBase64Url(randomBytes(32));
+  // Every assignment to the key is rewritten as one canonical line, so
+  // duplicates and quoted forms collapse and a rerun converges. Other
+  // settings keep their lines verbatim.
+  const kept = vars.split(/\r?\n/).filter((line) => !assignsVar(line, "BADTOWER_METRICS_KEY"));
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  const next = `${kept.join("\n")}${kept.length === 0 ? "" : "\n"}BADTOWER_METRICS_KEY=${key}\n`;
   writePrivate(varsFile, next);
   writePrivate(keyFile, `${key}\n`);
   console.log(`metrics credential written to ${keyFile}`);
@@ -413,17 +491,24 @@ function cmdCloudflareDeploy({ flags }) {
     const base = fs.readFileSync(path.join(REPO, config), "utf8");
     // Kept beside the original: the config's relative `main` resolves
     // against the file's own directory, so a copy at the repository
-    // root would point Wrangler at a missing entrypoint.
-    const tmp = path.join("apps", "station", "wrangler.deploy.jsonc");
-    fs.writeFileSync(
-      path.join(REPO, tmp),
-      base.replace(/"workers_dev": true,/, `"workers_dev": false,`),
-    );
+    // root would point Wrangler at a missing entrypoint. The name is
+    // per-process so overlapping deploys cannot clobber each other,
+    // and the child result is inspected only after cleanup — exiting
+    // on the error first would strand the generated file.
+    const tmp = path.join("apps", "station", `wrangler.deploy-${process.pid}.jsonc`);
+    let result;
     try {
-      run("npx", ["wrangler", "deploy", "-c", tmp, "--secrets-file", varsFile, "--domains", flags.domain], { cwd: REPO });
+      fs.writeFileSync(
+        path.join(REPO, tmp),
+        base.replace(/"workers_dev": true,/, `"workers_dev": false,`),
+      );
+      result = attempt("npx", ["wrangler", "deploy", "-c", tmp,
+        "--secrets-file", varsFile, "--domains", flags.domain], { cwd: REPO });
     } finally {
       fs.rmSync(path.join(REPO, tmp), { force: true });
     }
+    if (result.error) fail(`npx: ${result.error.message}`);
+    if (result.status !== 0) fail(`npx exited ${result.status}`);
   }
   console.log("deployed to cloudflare");
 }

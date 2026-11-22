@@ -3,7 +3,7 @@ node_modules/
 .wrangler/
 .dev.vars*
 !.dev.vars.example
-/wrangler.deploy.jsonc
+wrangler.deploy-*.jsonc
 .env*
 coverage/
 build/

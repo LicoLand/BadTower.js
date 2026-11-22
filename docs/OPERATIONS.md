@@ -50,10 +50,11 @@ npm run station -- cloudflare-deploy --dir ~/private/badtower [--domain NAME]
 
 Deploys with `wrangler deploy --secrets-file .dev.vars` (uploads
 `BADTOWER_STATION_KEY` and `BADTOWER_METRICS_KEY` from the file, never
-argv). `--domain` writes a temporary `wrangler.deploy.jsonc` beside the
-original — `main` is relative to the config file — with `workers_dev`
-disabled, deploys it with `--domains NAME`, then deletes it. Uses the
-operator's existing wrangler login.
+argv). `--domain` writes a temporary `wrangler.deploy-<pid>.jsonc`
+beside the original — `main` is relative to the config file — with
+`workers_dev` disabled, deploys it with `--domains NAME`, then deletes
+it whether the deploy succeeds or fails. Uses the operator's existing
+wrangler login.
 
 ## Self-hosted deploy
 
@@ -85,13 +86,17 @@ Both live in `apps/station/wrangler.jsonc` `vars` (and `.dev.vars` for
 
 ## Mailboxes bound before transport records
 
-Mailboxes bound before the `binding` table existed carry no recorded
-transport: submissions and recipient operations on either surface are
-refused until the bound owner re-verifies — re-POST the stored subject
-to `/v1/native/reserve` for a natively bound mailbox, or reconnect and
-HELLO with the bound device key for a listener-bound one. The first
-verified re-bind records the transport and preserves the queued
-packets.
+Mailboxes bound before the `meta.via` transport record existed carry
+no recorded transport: submissions and recipient operations on either
+surface are refused until the bound owner re-verifies — re-POST the
+stored subject to `/v1/native/reserve` for a natively bound mailbox,
+or reconnect and HELLO with the bound device key for a listener-bound
+one. The first verified re-bind records the transport in the meta row
+and preserves the queued packets. Mailboxes bound under the original
+schema (owner in `meta.device_key`) upgrade automatically on first
+read — the column is renamed, not dropped — so the same verified
+re-bind restores them, even at a mailbox's storage ceiling: the
+transport update writes in place and needs no new page.
 
 ## Health
 

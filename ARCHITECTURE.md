@@ -25,8 +25,8 @@ BadTower.js is a permanent-mailbox relay with three ownership layers:
   requests. `POST /v1/revoke` verifies a separate `btr1`-domain HMAC
   body and calls `revoke()`.
 - **Mailbox DO (per mailbox id)**: the core `MailboxStore` owns the
-  SQLite tables `meta` (bound opaque subject identifier, revoked flag),
-  `binding` (which transport bound the mailbox), `alloc` (durable
+  SQLite tables `meta` (bound opaque subject identifier, revoked flag,
+  the transport the mailbox bound through), `alloc` (durable
   non-reusing packet sequence) and `packet` (sequence, handle, body).
   The plugin session owns the WebSocket attachments; all session state
   lives there, so the object hibernates freely. Core and plugin share

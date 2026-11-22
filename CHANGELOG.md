@@ -48,9 +48,9 @@ before the first tagged release; no tag or published artifact is implied.
   bound through a compatibility listener now answers 403 to native
   claim, settle and capacity, so a copied `btm1` admission credential
   can no longer read or delete a device-bound mailbox's packets. The
-  first binding records its transport in the new `binding` table;
-  mailboxes bound before this record exists answer as unknown, never
-  as native. Submit stays open cross-transport. No wire field, status
+  first binding records its transport in `meta.via`; mailboxes bound
+  before this record exists answer as unknown, never as native.
+  Submit stays open cross-transport. No wire field, status
   set or documented outcome changed, so the native contract stays
   `1.0`; the refusal shape is the one unbound and revoked mailboxes
   already answered.
@@ -99,3 +99,30 @@ before the first tagged release; no tag or published artifact is implied.
   beside `apps/station/wrangler.jsonc`, so the config's relative
   `main` still resolves to `src/worker.ts`; deploy-button and
   operations documentation now name both required secrets.
+- Mailboxes bound under the original schema (owner in
+  `meta.device_key`) upgrade on first read: the column is renamed to
+  `subject`, so the verified owner re-binds and recovers queued
+  packets instead of hitting a missing-column insert. The binding
+  transport now lives in `meta.via`: recording it on re-bind is an
+  in-place update that needs no new page, so a mailbox at its storage
+  ceiling can still re-bind and drain, and the retired `binding`
+  table is folded in and dropped.
+- Allocator rows persisted below the sequence floor are raised inside
+  the packet transaction, so databases that already carried a low
+  counter keep every future sequence above the pre-allocator epoch.
+- A HELLO against a natively bound mailbox now closes with the
+  documented wrong-transport 1008 before the subject is compared,
+  whether or not the presented device key matches.
+- `station.mjs metrics-key` resolves `BADTOWER_METRICS_KEY` the way
+  Wrangler parses `.dev.vars` — quoted values and last-wins
+  duplicates — so it can no longer adopt a shadowed entry and strand
+  the CLI on a stale credential. Both output files are now replaced
+  atomically, and metrics.key/.dev.vars resolving to the same file is
+  refused before either write.
+- The private-output containment check matches only an actual `..`
+  path component, so in-repository names that merely start with two
+  dots are refused on both the lexical and symlink-resolved paths.
+- `cloudflare-deploy --domain` writes its temporary Wrangler config
+  under a unique per-process name and removes it even when the
+  Wrangler child fails, so a rejected deploy no longer strands a
+  generated file and concurrent deploys cannot collide.

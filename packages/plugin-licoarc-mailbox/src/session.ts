@@ -192,6 +192,16 @@ export class LicoArcMailbox {
       this.close(ws, CLOSE_POLICY);
       return;
     }
+    // A mailbox already bound through the native surface refuses this
+    // listener on the recorded transport alone — the documented
+    // wrong-transport answer is 1008 whether or not the presented key
+    // matches the stored subject, so the check runs before the subject
+    // is ever compared. An unrecorded binding admits the re-bind below,
+    // which then records this transport.
+    if (this.deps.store.boundVia() === "native") {
+      this.close(ws, CLOSE_POLICY);
+      return;
+    }
     // HELLO binds the verified device key as this mailbox's opaque
     // subject; the durable bind still enforces the invitation's
     // deadline carried in the attachment, while an already-bound

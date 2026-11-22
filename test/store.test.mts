@@ -12,9 +12,16 @@ const D0 = 12_288;
 const PAGE = 4_096;
 const ROW_OVERHEAD = 64; // cell header + handle index slack, per packet row
 
+const CURRENT_COLUMNS: Record<string, string[]> = {
+  meta: ["id", "subject", "revoked", "via"],
+  alloc: ["id", "next"],
+  packet: ["seq", "handle", "body"],
+};
+
 class FakeSql {
   tables = new Set<string>();
-  meta: { subject: ArrayBuffer | null; revoked: number } | null = null;
+  columns = new Map<string, Set<string>>();
+  meta: { subject: ArrayBuffer | null; revoked: number; via: string | null } | null = null;
   binding: string | null = null;
   allocNext: number | undefined = undefined;
   packets = new Map<number, { handle: ArrayBuffer; body: ArrayBuffer }>();
@@ -23,6 +30,7 @@ class FakeSql {
 
   reset(): void {
     this.tables.clear();
+    this.columns.clear();
     this.meta = null;
     this.binding = null;
     this.allocNext = undefined;
@@ -30,10 +38,16 @@ class FakeSql {
     this.payloadBytes = 0;
   }
 
+  /** Seed a table directly — for pre-upgrade schema fixtures. */
+  createTable(name: string, columns: string[]): void {
+    this.tables.add(name);
+    this.columns.set(name, new Set(columns));
+  }
+
   /** transactionSync semantics: run the closure, roll back on throw. */
   run<T>(fn: () => T): T {
     const snapshot = {
-      meta: this.meta,
+      meta: this.meta === null ? null : { ...this.meta },
       binding: this.binding,
       allocNext: this.allocNext,
       packets: new Map(this.packets),
@@ -61,30 +75,77 @@ class FakeSql {
     if (!this.tables.has(table)) throw new Error(`no such table: ${table}`);
   }
 
+  /** Real SQLite answers queries on a missing column with an error. */
+  private requireColumn(table: string, column: string): void {
+    this.require(table);
+    if (!this.columns.get(table)!.has(column)) {
+      throw new Error(`no such column: ${column}`);
+    }
+  }
+
+  /** Growing the file past the platform ceiling answers SQLITE_FULL. */
+  private checkGrow(): void {
+    if (this.databaseSize + PAGE > this.fullAt) {
+      throw new Error("SQLITE_FULL: database or disk is full");
+    }
+  }
+
   exec(query: string, ...params: unknown[]): { toArray(): unknown[] } {
     const sql = query.replace(/\s+/g, " ").trim();
     if (sql.startsWith("CREATE TABLE")) {
-      this.tables.add(/^CREATE TABLE IF NOT EXISTS (\w+)/.exec(sql)![1]!);
+      const name = /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(sql)![1]!;
+      if (!this.tables.has(name)) this.createTable(name, CURRENT_COLUMNS[name] ?? []);
       return { toArray: () => [] };
     }
-    if (sql === "SELECT subject, revoked FROM meta WHERE id = 0") {
+    if (sql.startsWith("ALTER TABLE meta RENAME COLUMN")) {
       this.require("meta");
+      const [from, to] = /RENAME COLUMN (\w+) TO (\w+)/.exec(sql)!.slice(1);
+      this.requireColumn("meta", from!);
+      this.columns.get("meta")!.delete(from!);
+      this.columns.get("meta")!.add(to!);
+      return { toArray: () => [] };
+    }
+    if (sql.startsWith("ALTER TABLE meta ADD COLUMN")) {
+      this.require("meta");
+      const column = /ADD COLUMN (\w+)/.exec(sql)![1]!;
+      this.columns.get("meta")!.add(column);
+      return { toArray: () => [] };
+    }
+    if (sql.startsWith("DROP TABLE")) {
+      const name = /^DROP TABLE (\w+)/.exec(sql)![1]!;
+      this.require(name);
+      this.tables.delete(name);
+      this.columns.delete(name);
+      return { toArray: () => [] };
+    }
+    // Schema probe: `SELECT <col> FROM <table> LIMIT 0`.
+    const probe = /^SELECT (\w+) FROM (\w+) LIMIT 0$/.exec(sql);
+    if (probe !== null) {
+      this.requireColumn(probe[2]!, probe[1]!);
+      return { toArray: () => [] };
+    }
+    if (sql === "SELECT subject, revoked, via FROM meta WHERE id = 0") {
+      for (const column of ["subject", "revoked", "via"]) this.requireColumn("meta", column);
       return { toArray: () => (this.meta === null ? [] : [this.meta]) };
     }
-    if (sql.startsWith("INSERT INTO meta")) {
+    if (sql === "INSERT INTO meta(id, subject, revoked, via) VALUES(0, ?, 0, ?)") {
       this.require("meta");
-      this.meta = params.length === 0
-        ? { subject: null, revoked: 1 }
-        : { subject: params[0] as ArrayBuffer, revoked: 0 };
+      this.checkGrow();
+      this.meta = { subject: params[0] as ArrayBuffer, revoked: 0, via: params[1] as string };
       return { toArray: () => [] };
     }
-    if (sql.startsWith("INSERT INTO binding")) {
-      this.require("binding");
-      this.binding = params[0] as string;
+    if (sql === "INSERT INTO meta(id, subject, revoked) VALUES(0, NULL, 1)") {
+      this.require("meta");
+      this.meta = { subject: null, revoked: 1, via: null };
+      return { toArray: () => [] };
+    }
+    if (sql.startsWith("UPDATE meta SET via = ?")) {
+      this.requireColumn("meta", "via");
+      if (this.meta !== null) this.meta = { ...this.meta, via: params[0] as string };
       return { toArray: () => [] };
     }
     if (sql === "SELECT via FROM binding WHERE id = 0") {
-      this.require("binding");
+      this.requireColumn("binding", "via");
       return { toArray: () => (this.binding === null ? [] : [{ via: this.binding }]) };
     }
     if (sql === "SELECT next FROM alloc WHERE id = 0") {
@@ -149,7 +210,12 @@ class FakeSql {
     }
     if (sql.startsWith("DELETE FROM packet WHERE seq")) {
       this.require("packet");
-      this.packets.delete(params[0] as number);
+      const seq = params[0] as number;
+      const row = this.packets.get(seq);
+      if (row !== undefined) {
+        this.packets.delete(seq);
+        this.payloadBytes -= row.handle.byteLength + row.body.byteLength + ROW_OVERHEAD;
+      }
       return { toArray: () => [] };
     }
     throw new Error(`fake sql cannot run: ${sql}`);
@@ -246,11 +312,11 @@ describe("binding-scoped recipient operations", () => {
 
   it("refuses submissions and recipient operations until a verified re-bind records the transport", () => {
     const { sql, store } = fixture(1_000_000_000);
-    // A mailbox bound before binding records existed: meta and packet
-    // rows only, no binding record.
-    sql.tables.add("meta");
-    sql.tables.add("packet");
-    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    // A mailbox bound before transport records existed: meta and packet
+    // rows only, no via column.
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
     sql.packets.set(3, { handle: handle().buffer as ArrayBuffer, body: bytes(4).buffer as ArrayBuffer });
     expect(store.boundVia()).toBeNull();
     // Recipient operations answer as unbound on BOTH surfaces, and new
@@ -280,8 +346,9 @@ describe("binding-scoped recipient operations", () => {
 
   it("records the listener transport when a listener session re-binds an unrecorded mailbox", () => {
     const { sql, store } = fixture(1_000_000_000);
-    sql.tables.add("meta");
-    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
     expect(store.reserve(subject(), live(), "listener")).toBe("bound");
     expect(store.boundVia()).toBe("listener");
     // The listener surface then owns recipient access; native is closed.
@@ -301,19 +368,97 @@ describe("binding-scoped recipient operations", () => {
   });
 });
 
+describe("schema upgrade", () => {
+  it("re-binds an original-schema mailbox: the device_key owner and its queue survive", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // The original mailbox schema kept the bound owner in
+    // meta.device_key and had no transport column or binding record.
+    sql.createTable("meta", ["id", "device_key", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
+    sql.packets.set(3, { handle: handle().buffer as ArrayBuffer, body: bytes(4).buffer as ArrayBuffer });
+    // The owner is still the bound subject — the upgrade renames the
+    // column, it does not drop it.
+    expect(store.bound()).toBe(true);
+    expect(store.boundVia()).toBeNull();
+    expect(store.submit(handle(), bytes(8)))
+      .toEqual({ outcome: "rejected", reason: "target-unavailable" });
+    expect(store.reserve(new Uint8Array(32).fill(9), live(), "native"))
+      .toBe("subject-mismatch");
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+    expect(store.nativeClaim([], 16)!.map((p) => p.sequence)).toEqual([3]);
+  });
+
+  it("re-binds at the storage ceiling: the transport update needs no new page", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
+    sql.packets.set(3, { handle: handle().buffer as ArrayBuffer, body: bytes(4).buffer as ArrayBuffer });
+    sql.payloadBytes = 4 + ROW_OVERHEAD;
+    // The object is at its platform ceiling: any page-allocating write
+    // answers SQLITE_FULL. Recording the transport in the meta row
+    // itself is an in-place update, so the re-bind still lands and the
+    // owner can drain.
+    sql.fullAt = sql.databaseSize;
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+    expect(store.nativeClaim([], 16)!.map((p) => p.sequence)).toEqual([3]);
+    expect(store.nativeSettle([3])).toBe(true);
+    // Settling freed the queue's bytes below the ceiling; the mailbox
+    // receives again.
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+  });
+
+  it("folds a recorded binding table into meta.via and drops it", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // The intermediate schema kept the transport in its own table.
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("binding", ["id", "via"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
+    sql.binding = "native";
+    expect(store.boundVia()).toBe("native");
+    expect(sql.tables.has("binding")).toBe(false);
+    expect(sql.meta!.via).toBe("native");
+    // The folded record is never rewritten by a later re-reserve.
+    expect(store.reserve(subject(), live(), "listener")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+  });
+});
+
 describe("sequence allocation", () => {
   it("seeds a drained legacy queue above the pre-allocator epoch", () => {
     const { sql, store } = fixture(1_000_000_000);
     // A legacy mailbox that queued and settled packets before the
     // allocator existed: its live maximum is gone with the settled rows,
     // so seeding must come from the epoch floor, not the queue.
-    sql.tables.add("meta");
-    sql.tables.add("packet");
-    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0 };
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
     expect(store.reserve(subject(), live(), "native")).toBe("bound");
     expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
     const first = store.claim([], 16)!;
     expect(first[0]!.sequence).toBe(SEQUENCE_FLOOR);
+  });
+
+  it("raises an allocator row persisted below the floor inside the packet transaction", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // A database that already persisted a low allocator under a
+    // pre-floor build: seeding-on-absence alone would keep issuing
+    // sequences in the legacy range.
+    sql.createTable("meta", ["id", "subject", "revoked", "via"]);
+    sql.createTable("alloc", ["id", "next"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: "native" };
+    sql.allocNext = 5;
+    expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+    expect(store.claim([], 16)![0]!.sequence).toBe(SEQUENCE_FLOOR);
+    // The raised counter holds for later allocations too.
+    expect(store.submit(handle(), bytes(9))).toEqual({ outcome: "accepted" });
+    const second = store.claim([SEQUENCE_FLOOR], 16)!;
+    expect(second[0]!.sequence).toBe(SEQUENCE_FLOOR + 1);
   });
 
   it("never reuses a settled sequence for a newer packet", () => {
@@ -341,7 +486,7 @@ describe("revocation", () => {
     const calls: Calls = [];
     const { sql, store } = fixture(1_000_000_000, calls);
     await store.revoke();
-    expect(sql.meta).toEqual({ subject: null, revoked: 1 });
+    expect(sql.meta).toEqual({ subject: null, revoked: 1, via: null });
     expect(store.revoked()).toBe(true);
     expect(store.canBind(live())).toBe("closed");
     expect(store.reserve(subject(), live(), "native")).toBe("revoked");
@@ -361,7 +506,7 @@ describe("store meter", () => {
     const claimed = store.claim([], 16)!;
     expect(store.settle(claimed.map((p) => p.sequence))).toBe(true);
     const rowsWritten = calls.filter(([name]) => name === "rowsWritten");
-    expect(rowsWritten).toContainEqual(["rowsWritten", "reserve", 2]);
+    expect(rowsWritten).toContainEqual(["rowsWritten", "reserve", 1]);
     expect(rowsWritten).toContainEqual(["rowsWritten", "submit", 1]);
     expect(rowsWritten).toContainEqual(["rowsWritten", "settle", 1]);
     const rowsRead = calls.filter(([name]) => name === "rowsRead");

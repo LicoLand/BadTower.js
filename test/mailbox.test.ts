@@ -461,6 +461,15 @@ describe("binding transport scope", () => {
     if (challenge.type !== "frame" || challenge.data.kind !== "challenge") throw new Error("no challenge");
     conn.ws.send(helloFrame(dev.pub, new Uint8Array(dev.hello(challenge.data.nonce))));
     expect(await conn.events.take()).toEqual({ type: "close", code: 1008 });
+    // The wrong-transport refusal is decided before the subject is
+    // compared: a different device key on the same natively bound
+    // mailbox still closes 1008, never the 4003 subject mismatch.
+    const other = device();
+    const conn2 = (await connect(invite(mailboxId))) as LiveConn;
+    const challenge2 = await conn2.events.take();
+    if (challenge2.type !== "frame" || challenge2.data.kind !== "challenge") throw new Error("no challenge");
+    conn2.ws.send(helloFrame(other.pub, new Uint8Array(other.hello(challenge2.data.nonce))));
+    expect(await conn2.events.take()).toEqual({ type: "close", code: 1008 });
     // The bound owner's own transport stays open.
     const claim = await SELF.fetch("https://station.test/v1/native/claim", {
       method: "POST",
@@ -517,6 +526,46 @@ describe("binding transport scope", () => {
     expect(deliver.data.sequence).toBe(5);
     owner.conn.ws.close();
     sender.conn.ws.close();
+  });
+
+  it("restores an original-schema mailbox through HELLO, preserving owner and queue", async () => {
+    const mailboxId = randomBytes(16);
+    const dev = device();
+    const stub = env.MAILBOX.getByName(Buffer.from(mailboxId).toString("hex"));
+    // The original mailbox schema kept the owner in meta.device_key —
+    // no subject column, no transport record.
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS meta(id INTEGER PRIMARY KEY CHECK(id = 0), device_key BLOB, revoked INTEGER NOT NULL DEFAULT 0)",
+      );
+      state.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS packet(seq INTEGER PRIMARY KEY, handle BLOB NOT NULL, body BLOB NOT NULL)",
+      );
+      state.storage.sql.exec(
+        "INSERT INTO meta(id, device_key, revoked) VALUES(0, ?, 0)",
+        new Uint8Array(dev.pub).buffer,
+      );
+      state.storage.sql.exec(
+        "INSERT INTO packet(seq, handle, body) VALUES(?, ?, ?)",
+        5,
+        new Uint8Array(handleFor(mailboxId)).buffer,
+        new Uint8Array(randomBytes(8)).buffer,
+      );
+    });
+    // A different device cannot claim the upgraded mailbox.
+    const intruder = (await connect(invite(mailboxId))) as LiveConn;
+    const challenge = await intruder.events.take();
+    if (challenge.type !== "frame" || challenge.data.kind !== "challenge") throw new Error("no challenge");
+    const other = device();
+    intruder.ws.send(helloFrame(other.pub, new Uint8Array(other.hello(challenge.data.nonce))));
+    expect(await intruder.events.take()).toEqual({ type: "close", code: 4003 });
+    // The verified owner re-binds: the upgrade preserves the subject,
+    // records the listener transport and keeps the queued packet.
+    const owner = await ready(invite(mailboxId), dev);
+    const deliver = await takeMatching(owner.conn.events, isDeliver);
+    if (deliver.type !== "frame" || deliver.data.kind !== "deliver") throw new Error("queued packet lost");
+    expect(deliver.data.sequence).toBe(5);
+    owner.conn.ws.close();
   });
 
   it("ignores an ACK for a sequence the connection never delivered", async () => {
