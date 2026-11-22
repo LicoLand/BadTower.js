@@ -114,6 +114,19 @@ export function isStorageFull(error: unknown): boolean {
   );
 }
 
+/**
+ * Whether a storage error only reports an absent table or column —
+ * a schema probe's way of saying the object predates that shape.
+ * Any other failure (I/O, corruption, a rejected write) is unexpected
+ * and must surface: mistaking it for "no schema" could cache a bound
+ * mailbox's metadata as unbound.
+ */
+function isMissingSchemaObject(error: unknown): boolean {
+  return (
+    error instanceof Error && /no such (?:table|column)/i.test(error.message)
+  );
+}
+
 export class MailboxStore {
   private meta: Meta | null = null;
   private schemaUpgraded = false;
@@ -155,18 +168,21 @@ export class MailboxStore {
    */
   private upgradeSchema(): void {
     if (this.schemaUpgraded) return;
-    this.schemaUpgraded = true;
     const sql = this.ctx.storage.sql;
     const hasColumn = (table: string, column: string): boolean => {
       try {
         sql.exec(`SELECT ${column} FROM ${table} LIMIT 0`);
         return true;
-      } catch {
-        return false;
+      } catch (error) {
+        if (isMissingSchemaObject(error)) return false;
+        throw error;
       }
     };
     // No meta table at all: the mailbox never bound — nothing to do.
-    if (!hasColumn("meta", "id")) return;
+    if (!hasColumn("meta", "id")) {
+      this.schemaUpgraded = true;
+      return;
+    }
     if (!hasColumn("meta", "subject") && hasColumn("meta", "device_key")) {
       sql.exec("ALTER TABLE meta RENAME COLUMN device_key TO subject");
     }
@@ -174,14 +190,22 @@ export class MailboxStore {
       sql.exec("ALTER TABLE meta ADD COLUMN via TEXT");
     }
     if (hasColumn("binding", "via")) {
-      const rows = sql.exec("SELECT via FROM binding WHERE id = 0").toArray();
-      this.meter()?.rowsRead("binding", rows.length);
-      const via = (rows[0] as { via: unknown } | undefined)?.via;
-      sql.exec("DROP TABLE binding");
-      if (via === "native" || via === "listener") {
-        sql.exec("UPDATE meta SET via = ? WHERE id = 0 AND via IS NULL", via);
-      }
+      // The copy and the drop commit or roll back together: a failed
+      // copy must not destroy the only record of the binding.
+      this.ctx.storage.transactionSync(() => {
+        const rows = sql.exec("SELECT via FROM binding WHERE id = 0").toArray();
+        this.meter()?.rowsRead("binding", rows.length);
+        const via = (rows[0] as { via: unknown } | undefined)?.via;
+        if (via === "native" || via === "listener") {
+          sql.exec("UPDATE meta SET via = ? WHERE id = 0 AND via IS NULL", via);
+        }
+        sql.exec("DROP TABLE binding");
+      });
     }
+    // Completion is marked only after every step ran: a failure leaves
+    // the flag clear so the same object retries the upgrade instead of
+    // skipping ahead to a metadata read that cannot see the owner.
+    this.schemaUpgraded = true;
   }
 
   private loadMeta(): Meta {
@@ -192,8 +216,10 @@ export class MailboxStore {
       rows = this.ctx.storage.sql
         .exec("SELECT subject, revoked, via FROM meta WHERE id = 0")
         .toArray();
-    } catch {
-      // No meta table is an unbound mailbox, not an error.
+    } catch (error) {
+      // A never-bound object has no meta table; anything else is a
+      // real failure, not an unbound mailbox.
+      if (!isMissingSchemaObject(error)) throw error;
     }
     this.meter()?.rowsRead("meta", rows.length);
     const row = rows[0] as

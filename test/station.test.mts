@@ -3,6 +3,9 @@ import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+// The pinned .dev.vars parser: dotenv 16.3.1, the exact version the
+// pinned Wrangler 4.122.0 bundles for --secrets-file and dev vars.
+import { parse as parseDotenv } from "dotenv";
 import { describe, expect, it } from "vitest";
 
 const STATION = path.resolve("scripts/station.mjs");
@@ -185,6 +188,64 @@ describe("station.mjs metrics-key", () => {
     const lines = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8").split("\n")
       .filter((line) => line.includes("BADTOWER_METRICS_KEY"));
     expect(lines).toEqual([`BADTOWER_METRICS_KEY=${deployed}`]);
+  }, TEST_TIMEOUT);
+
+  it("adopts the credential the pinned parser reads past an inline comment", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    const stale = Buffer.from(randomBytes(32)).toString("base64url");
+    const deployed = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    // Wrangler strips an inline comment after an unquoted value and
+    // honours a `KEY: value` form; a literal parser rejects the real
+    // credential here and could adopt a different key, breaking
+    // metrics auth against the running Worker.
+    const vars =
+      `BADTOWER_STATION_KEY=${key}\n` +
+      `BADTOWER_METRICS_KEY: ${stale}\n` +
+      `BADTOWER_METRICS_KEY=${deployed} # rotated by ops\n`;
+    expect(parseDotenv(vars).BADTOWER_METRICS_KEY).toBe(deployed);
+    fs.writeFileSync(path.join(dir, ".dev.vars"), vars, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    expect(fs.readFileSync(path.join(dir, "metrics.key"), "utf8").trim()).toBe(deployed);
+    const after = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
+    expect(parseDotenv(after).BADTOWER_METRICS_KEY).toBe(deployed);
+    expect(
+      after.split("\n").filter((line) => /^BADTOWER_METRICS_KEY\s*[=:]/.test(line)),
+    ).toEqual([`BADTOWER_METRICS_KEY=${deployed}`]);
+  }, TEST_TIMEOUT);
+
+  it("leaves an unrelated multiline value byte-identical while rewriting", async () => {
+    const dir = path.join(tempDir(), "station");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const key = Buffer.from(randomBytes(32)).toString("base64url");
+    const stale = Buffer.from(randomBytes(32)).toString("base64url");
+    fs.writeFileSync(path.join(dir, "station.key"), `${key}\n`, { mode: 0o600 });
+    // To the pinned parser the NAME= line inside the quoted value is
+    // SEALED's content, not an assignment: line-based removal would
+    // cut text out of an unrelated variable.
+    const shielded = "-----BEGIN SEALED\nBADTOWER_METRICS_KEY=inside-the-value\n-----END SEALED";
+    const vars =
+      `BADTOWER_STATION_KEY=${key}\n` +
+      `SEALED="${shielded}"\n` +
+      `BADTOWER_METRICS_KEY=${stale}\n` +
+      `# keep this comment\n`;
+    expect(parseDotenv(vars).SEALED).toBe(shielded);
+    expect(parseDotenv(vars).BADTOWER_METRICS_KEY).toBe(stale);
+    fs.writeFileSync(path.join(dir, ".dev.vars"), vars, { mode: 0o600 });
+    await run(["metrics-key", "--dir", dir]);
+    const after = fs.readFileSync(path.join(dir, ".dev.vars"), "utf8");
+    expect(after).toContain(`SEALED="${shielded}"`);
+    expect(after).toContain("# keep this comment");
+    expect(parseDotenv(after).SEALED).toBe(shielded);
+    expect(parseDotenv(after).BADTOWER_METRICS_KEY).toBe(stale);
+    // Outside the sealed value, the credential collapses to one
+    // canonical assignment; the embedded NAME= text is untouched.
+    const outside = after.replace(`SEALED="${shielded}"`, "");
+    expect(
+      outside.split("\n").filter((line) => /^BADTOWER_METRICS_KEY\s*[=:]/.test(line)),
+    ).toEqual([`BADTOWER_METRICS_KEY=${stale}`]);
   }, TEST_TIMEOUT);
 
   it("refuses aliased credential destinations before writing either file", async () => {

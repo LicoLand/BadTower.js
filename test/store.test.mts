@@ -27,6 +27,12 @@ class FakeSql {
   packets = new Map<number, { handle: ArrayBuffer; body: ArrayBuffer }>();
   payloadBytes = 0;
   fullAt = Number.POSITIVE_INFINITY;
+  private faults: Array<{ on: RegExp; error: Error }> = [];
+
+  /** One-shot fault injection: the first matching statement throws once. */
+  fault(on: RegExp, error: Error): void {
+    this.faults.push({ on, error });
+  }
 
   reset(): void {
     this.tables.clear();
@@ -47,6 +53,10 @@ class FakeSql {
   /** transactionSync semantics: run the closure, roll back on throw. */
   run<T>(fn: () => T): T {
     const snapshot = {
+      tables: new Set(this.tables),
+      columns: new Map(
+        [...this.columns.entries()].map(([name, set]) => [name, new Set(set)]),
+      ),
       meta: this.meta === null ? null : { ...this.meta },
       binding: this.binding,
       allocNext: this.allocNext,
@@ -56,6 +66,8 @@ class FakeSql {
     try {
       return fn();
     } catch (error) {
+      this.tables = snapshot.tables;
+      this.columns = snapshot.columns;
       this.meta = snapshot.meta;
       this.binding = snapshot.binding;
       this.allocNext = snapshot.allocNext;
@@ -92,6 +104,11 @@ class FakeSql {
 
   exec(query: string, ...params: unknown[]): { toArray(): unknown[] } {
     const sql = query.replace(/\s+/g, " ").trim();
+    const injected = this.faults.findIndex((f) => f.on.test(sql));
+    if (injected !== -1) {
+      const [fault] = this.faults.splice(injected, 1);
+      throw fault!.error;
+    }
     if (sql.startsWith("CREATE TABLE")) {
       const name = /^CREATE TABLE IF NOT EXISTS (\w+)/.exec(sql)![1]!;
       if (!this.tables.has(name)) this.createTable(name, CURRENT_COLUMNS[name] ?? []);
@@ -409,6 +426,47 @@ describe("schema upgrade", () => {
     // Settling freed the queue's bytes below the ceiling; the mailbox
     // receives again.
     expect(store.submit(handle(), bytes(8))).toEqual({ outcome: "accepted" });
+  });
+
+  it("retries the upgrade on the same object after a transient ALTER failure", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // The original mailbox schema: the bound owner lives in
+    // meta.device_key and there is no transport column.
+    sql.createTable("meta", ["id", "device_key", "revoked"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
+    // A one-time ALTER failure must not mark the upgrade complete —
+    // otherwise the next metadata read would skip it and cache this
+    // bound mailbox as unbound.
+    sql.fault(/RENAME COLUMN/, new Error("SQLITE_BUSY: database is locked"));
+    expect(() => store.bound()).toThrow(/SQLITE_BUSY/);
+    // The same instance retries the upgrade and still sees the owner.
+    expect(store.bound()).toBe(true);
+    expect(store.boundVia()).toBeNull();
+    expect(store.reserve(subject(), live(), "native")).toBe("bound");
+    expect(store.boundVia()).toBe("native");
+  });
+
+  it("keeps the legacy binding record when the transport copy fails mid-upgrade", () => {
+    const { sql, store } = fixture(1_000_000_000);
+    // The intermediate schema: the binding transport sits in its own
+    // table until the upgrade folds it into meta.via.
+    sql.createTable("meta", ["id", "subject", "revoked"]);
+    sql.createTable("binding", ["id", "via"]);
+    sql.createTable("packet", ["seq", "handle", "body"]);
+    sql.meta = { subject: new Uint8Array(32).fill(7).buffer, revoked: 0, via: null };
+    sql.binding = "listener";
+    // The copy fails once: the transaction must roll back so the only
+    // record of the binding survives for the retry.
+    sql.fault(/UPDATE meta SET via/, new Error("SQLITE_FULL: database or disk is full"));
+    expect(() => store.boundVia()).toThrow(/SQLITE_FULL/);
+    expect(sql.tables.has("binding")).toBe(true);
+    expect(sql.binding).toBe("listener");
+    expect(sql.meta!.via).toBeNull();
+    // The same instance retries: the fold-in completes atomically.
+    expect(store.boundVia()).toBe("listener");
+    expect(sql.tables.has("binding")).toBe(false);
+    expect(sql.meta!.via).toBe("listener");
   });
 
   it("folds a recorded binding table into meta.via and drops it", () => {

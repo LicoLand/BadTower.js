@@ -262,43 +262,70 @@ function cmdInvite({ flags }) {
 }
 
 /**
- * The effective value a dotenv file assigns `name`, parsed the way
- * Wrangler reads .dev.vars: optional `export`, whitespace around `=`,
- * single- or double-quoted values, comments and blank lines skipped,
- * and the LAST assignment wins for duplicate keys. Anything else —
- * first-match or literal-only parsing — can pick a shadowed stale
- * entry and diverge the CLI credential from the deployed one.
+ * The assignment grammar the pinned parser applies to .dev.vars:
+ * dotenv 16.3.1's LINE pattern — the exact source the pinned Wrangler
+ * 4.122.0 bundles — copied verbatim so the CLI resolves and rewrites
+ * the same value deploy would upload. `export` prefixes, `=` or `:`
+ * separators, quoted values spanning lines, inline comments after
+ * unquoted values, and last-assignment-wins all follow from it; the
+ * `d` flag only adds group offsets.
+ */
+const DEV_VARS_LINE = /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mgd;
+
+/**
+ * Every assignment the pinned parser sees, in file order: the name,
+ * the value exactly as Wrangler would bind it, and the span of the
+ * full lines the assignment occupies. A `NAME=` line inside another
+ * key's quoted multiline value is part of that value — the pattern
+ * above consumes it there — so it never surfaces as an entry, and a
+ * comment the match's trailing `\s*(?:#.*)?` pulled in from the NEXT
+ * line is likewise excluded from the span below: removal can only
+ * ever touch complete assignments.
+ */
+function devVarsEntries(text) {
+  const src = text.replace(/\r\n?/g, "\n");
+  const entries = [];
+  DEV_VARS_LINE.lastIndex = 0;
+  let match;
+  while ((match = DEV_VARS_LINE.exec(src)) !== null) {
+    const name = match[1];
+    let value = (match[2] || "").trim();
+    const maybeQuote = value[0];
+    value = value.replace(/^(['"`])([\s\S]*)\1$/mg, "$2");
+    if (maybeQuote === '"') {
+      value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    }
+    // The assignment's first line holds the key (match[0] may start
+    // with whitespace from earlier blank lines); its last holds the
+    // end of the value token, or of the separator when there is none.
+    const keyStart = match.index + /^\s*(?:export\s+)?/.exec(match[0])[0].length;
+    const valueEnd =
+      match.indices[2]?.[1] ?? match.index + match[0].search(/[=:]/) + 1;
+    const lineStart = src.lastIndexOf("\n", keyStart - 1) + 1;
+    const newline = src.indexOf("\n", valueEnd);
+    entries.push({
+      name,
+      value,
+      start: lineStart,
+      end: newline === -1 ? src.length : newline + 1,
+    });
+  }
+  return entries;
+}
+
+/**
+ * The effective value a .dev.vars file assigns `name` — the LAST
+ * complete assignment the pinned parser sees, exactly as deploy would
+ * upload it. Anything else — first-match, literal-only or
+ * comment-blind parsing — can pick a shadowed stale entry and diverge
+ * the CLI credential from the deployed one.
  */
 function devVarsValue(text, name) {
   let value;
-  const assignment = new RegExp(`^(?:export\\s+)?${name}\\s*=\\s*(.*)$`);
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === "" || line.startsWith("#")) continue;
-    const match = assignment.exec(line);
-    if (match === null) continue;
-    let raw = match[1].trim();
-    const quote = raw[0];
-    if (
-      raw.length >= 2 &&
-      (quote === '"' || quote === "'" || quote === "`") &&
-      raw.endsWith(quote)
-    ) {
-      raw = raw.slice(1, -1);
-    }
-    value = raw;
+  for (const entry of devVarsEntries(text)) {
+    if (entry.name === name) value = entry.value;
   }
   return value;
-}
-
-/** Whether a .dev.vars line assigns `name`, whatever its syntax. */
-function assignsVar(rawLine, name) {
-  const line = rawLine.trim();
-  return (
-    line !== "" &&
-    !line.startsWith("#") &&
-    new RegExp(`^(?:export\\s+)?${name}\\s*=`).test(line)
-  );
 }
 
 /**
@@ -329,7 +356,8 @@ function cmdMetricsKey({ flags }) {
   };
   const vars = fs.existsSync(varsFile) ? fs.readFileSync(varsFile, "utf8") : "";
   // The value deploy actually uploads is the effective one — every
-  // assignment considered under Wrangler's last-wins precedence.
+  // assignment considered under the pinned parser's last-wins
+  // precedence, inline comments included.
   const varsValue = devVarsValue(vars, "BADTOWER_METRICS_KEY");
   const fileValue = fs.existsSync(keyFile) ? fs.readFileSync(keyFile, "utf8").trim() : "";
   const key = validKey(varsValue)
@@ -337,12 +365,20 @@ function cmdMetricsKey({ flags }) {
     : validKey(fileValue)
       ? fileValue
       : toBase64Url(randomBytes(32));
-  // Every assignment to the key is rewritten as one canonical line, so
-  // duplicates and quoted forms collapse and a rerun converges. Other
-  // settings keep their lines verbatim.
-  const kept = vars.split(/\r?\n/).filter((line) => !assignsVar(line, "BADTOWER_METRICS_KEY"));
-  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
-  const next = `${kept.join("\n")}${kept.length === 0 ? "" : "\n"}BADTOWER_METRICS_KEY=${key}\n`;
+  // Every complete assignment to the key is rewritten as one canonical
+  // line, so duplicates, colon forms and quoted forms collapse and a
+  // rerun converges. Removing by parsed assignment span — never by
+  // line matching — leaves every other setting byte-for-byte intact,
+  // including a `NAME=` line nested in an unrelated multiline value.
+  const src = vars.replace(/\r\n?/g, "\n");
+  let kept = src;
+  const spans = devVarsEntries(src)
+    .filter((entry) => entry.name === "BADTOWER_METRICS_KEY")
+    .map((entry) => [entry.start, entry.end])
+    .sort((a, b) => b[0] - a[0]);
+  for (const [start, end] of spans) kept = kept.slice(0, start) + kept.slice(end);
+  kept = kept.replace(/\s+$/, "");
+  const next = `${kept}${kept === "" ? "" : "\n"}BADTOWER_METRICS_KEY=${key}\n`;
   writePrivate(varsFile, next);
   writePrivate(keyFile, `${key}\n`);
   console.log(`metrics credential written to ${keyFile}`);
